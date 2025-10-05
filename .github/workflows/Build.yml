@@ -1,4 +1,4 @@
-name: Build PlatformIO
+name: Build
 
 on: [push]
 
