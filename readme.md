@@ -3,7 +3,7 @@
 <p>
 <img alt="License" src="https://img.shields.io/badge/license-MIT-blue">
 <img alt="Platform" src=https://img.shields.io/badge/platform-ESP32--S3-orange">
-  <img alt="Build PlatformIO" src="https://github.com/ScholaMates/NeuraLearn-Firmware/actions/workflows/Build.yml/badge.svg">
+  <img alt="Build" src="https://github.com/ScholaMates/NeuraLearn-Firmware/actions/workflows/Build.yml/badge.svg">
 </p>
 
 <p align="center">
