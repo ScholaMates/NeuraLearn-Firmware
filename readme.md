@@ -10,7 +10,7 @@
 
 <p align="center">
   <strong>The open-source firmware for a distraction-free, AI-powered learning companion.</strong><br>
-  <em>A project by <a href="https://github.com/Synapse-Labs">Synapse Labs</a></em>
+  <em>A project by <a href="https://github.com/ScholaMates">ScholaMates</a></em>
 </p>
 
 
@@ -53,7 +53,7 @@ To build a NeuraLearn device using this firmware, you will need the following co
 
 #### 1. Clone the Repository
 ```bash
-git clone [https://github.com/Synapse-Labs/NeuraLearn-Firmware.git](https://github.com/Synapse-Labs/NeuraLearn-Firmware.git)
+git clone [https://github.com/ScholaMates/NeuraLearn-Firmware.git](https://github.com/ScholaMates/NeuraLearn-Firmware.git)
 cd NeuraLearn-Firmware
 ```
 
