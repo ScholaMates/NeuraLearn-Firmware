@@ -5,6 +5,7 @@
 
 TFT_eSPI tft = TFT_eSPI();
 
+/*
 
 uint16_t read16(fs::File &f) {
   uint16_t result;
@@ -90,29 +91,90 @@ void drawBmp(const char *filename, int16_t x, int16_t y) {
   }
   bmpFS.close();
 }
+*/
+
+// 1. The Enum: A clean list of all possible states for NeuraLearn
+enum DeviceState {
+  SLEEPING,
+  AWAKENING,
+  LISTENING,
+  THINKING,
+  SPEAKING,
+  HAPPY,
+  POMODORO_FOCUS,
+  SAD_ERROR,
+  DEBUGGING
+};
+
+// A variable to hold the current state of the device
+DeviceState currentState = SLEEPING;
+
+
+// 2. The Function: Transforms a state into its facial counterpart string
+const char* getFaceString(DeviceState state) {
+  switch (state) {
+    case SLEEPING:
+      return "(⇀‿‿↼)";
+    case AWAKENING:
+      return "(≖‿‿≖)";
+    case LISTENING:
+      return "( ⚆⚆)";
+    case THINKING:
+      return "(✜‿‿✜)";
+    case SPEAKING:
+      return "(◕‿‿◕)";
+    case HAPPY:
+      return "(•‿‿•)";
+    case POMODORO_FOCUS:
+      return "(⌐■_■)";
+    case SAD_ERROR:
+      return "(╥☁╥ )";
+    case DEBUGGING:
+      return "(#__#)";
+    default:
+      return "(☓‿‿☓)"; // A "broken" face for any unknown state
+  }
+}
+
+void drawCurrentFace() {
+  const char* face = getFaceString(currentState);
+
+  tft.fillRect(0, 50, 320, 140, TFT_BLACK);
+
+  // Set the font and color (you might need to adjust the font)
+  // tft.setFreeFont(&FreeSansBold40pt7b);
+  tft.setTextColor(TFT_WHITE);
+
+  tft.drawCentreString(face, 160, 120, 4); // String, x_center, y_center, font_number
+}
 
 void setup() {
   Serial.begin(115200);
 
+  /*
   if (!LittleFS.begin()) {
     Serial.println("FATAL: LittleFS Mount Failed.");
     return;
   }
   Serial.println("LittleFS Mounted Successfully.");
+  */
 
   tft.init();
   tft.setRotation(0);
   tft.fillScreen(TFT_BLACK);
+  drawCurrentFace();
 }
 
 void loop() {
-  Serial.println("Drawing happy face...");
-
-  drawBmp("/happy.bmp", 20, 60); 
-  delay(3000);
-
-  Serial.println("Drawing sleepy face...");
-  // Draw sleepy.bmp at the same centered position
-  drawBmp("/sleepy.bmp", 20, 60);
-  delay(3000);
+  delay(2000);
+  
+  int nextState = (int)currentState + 1;
+  if (nextState > DEBUGGING) {
+    nextState = SLEEPING; // Loop back to the beginning
+  }
+  
+  currentState = (DeviceState)nextState;
+  
+  // Redraw the screen with the new face
+  drawCurrentFace();
 }
