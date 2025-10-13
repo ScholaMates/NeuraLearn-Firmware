@@ -3,7 +3,8 @@
 #include <SPI.h>
 #include <LittleFS.h>
 
-TFT_eSPI tft = TFT_eSPI();
+#define FONT_FILENAME "DejaVuSansMono-Bold-40"
+// TFT_eSPI tft = TFT_eSPI();
 
 /*
 
@@ -93,7 +94,8 @@ void drawBmp(const char *filename, int16_t x, int16_t y) {
 }
 */
 
-// 1. The Enum: A clean list of all possible states for NeuraLearn
+TFT_eSPI tft = TFT_eSPI();
+
 enum DeviceState {
   SLEEPING,
   AWAKENING,
@@ -106,11 +108,9 @@ enum DeviceState {
   DEBUGGING
 };
 
-// A variable to hold the current state of the device
 DeviceState currentState = SLEEPING;
 
 
-// 2. The Function: Transforms a state into its facial counterpart string
 const char* getFaceString(DeviceState state) {
   switch (state) {
     case SLEEPING:
@@ -118,7 +118,7 @@ const char* getFaceString(DeviceState state) {
     case AWAKENING:
       return "(≖‿‿≖)";
     case LISTENING:
-      return "( ⚆⚆)";
+      return "( ⚆_⚆)";
     case THINKING:
       return "(✜‿‿✜)";
     case SPEAKING:
@@ -141,40 +141,60 @@ void drawCurrentFace() {
 
   tft.fillRect(0, 50, 320, 140, TFT_BLACK);
 
-  // Set the font and color (you might need to adjust the font)
-  // tft.setFreeFont(&FreeSansBold40pt7b);
   tft.setTextColor(TFT_WHITE);
 
-  tft.drawCentreString(face, 160, 120, 4); // String, x_center, y_center, font_number
+  tft.drawString(face, 160, 120);
 }
+
 
 void setup() {
   Serial.begin(115200);
 
-  /*
   if (!LittleFS.begin()) {
     Serial.println("FATAL: LittleFS Mount Failed.");
     return;
   }
   Serial.println("LittleFS Mounted Successfully.");
-  */
 
   tft.init();
   tft.setRotation(0);
   tft.fillScreen(TFT_BLACK);
+
+  tft.setTextDatum(MC_DATUM);
+
+  tft.loadFont(FONT_FILENAME, LittleFS);
+
+  // Now, check if the font was loaded successfully.
+  if (tft.fontLoaded) {
+    Serial.println("Smooth Font loaded successfully!");
+  } else {
+    Serial.println("FATAL: Failed to load font file " FONT_FILENAME);
+    // As a backup, fall back to a built-in legacy font
+    tft.setTextFont(4);
+  }
+
+  // Initial face draw
   drawCurrentFace();
 }
 
+// A variable to track time for the non-blocking delay
+unsigned long previousMillis = 0;
+const long interval = 5000; // 5 seconds
+
 void loop() {
-  delay(2000);
-  
-  int nextState = (int)currentState + 1;
-  if (nextState > DEBUGGING) {
-    nextState = SLEEPING; // Loop back to the beginning
+  unsigned long currentMillis = millis();
+
+  if (currentMillis - previousMillis >= interval) {
+    previousMillis = currentMillis;
+
+    int nextState = (int)currentState + 1;
+    if (nextState > DEBUGGING) {
+      nextState = SLEEPING;
+    }
+    
+    currentState = (DeviceState)nextState;
+    
+    drawCurrentFace();
   }
-  
-  currentState = (DeviceState)nextState;
-  
-  // Redraw the screen with the new face
-  drawCurrentFace();
 }
+
