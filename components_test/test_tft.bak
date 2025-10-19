@@ -146,6 +146,10 @@ void drawCurrentFace() {
   tft.drawString(face, 160, 120);
 }
 
+void drawHeader() {
+  tft.setTextColor(TFT_WHITE);
+  tft.drawString("Device State Display", 160, 25);
+}
 
 void setup() {
   Serial.begin(115200);
