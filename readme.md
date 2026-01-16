@@ -14,12 +14,12 @@
 </p>
 
 
-## 🚀 The Problem
+## The Problem
 In a world of constant digital distraction, students need tools that help them focus, not pull them away. While phones and laptops offer access to powerful AI assistants, they are also gateways to social media, games, and notifications.
 
 NeuraLearn is the hardware solution to this problem. It's a small, friendly device that sits on a student's desk, providing on-demand academic assistance without the distractions of a multi-purpose device. This repository contains the firmware that brings the NeuraLearn hardware to life.
 
-## ✨ Core Features
+## Core Features
 This firmware enables the NeuraLearn device with a rich set of features designed for a focused learning experience:
 
 - Voice-Activated Interface: Hands-free interaction initiated by a custom wake word.
@@ -36,7 +36,7 @@ This firmware enables the NeuraLearn device with a rich set of features designed
 
 - Companion App Integration: Communicates with a backend to sync history and settings with a companion web portal.
 
-## 🛠️ Hardware Requirements
+## Hardware Requirements
 To build a NeuraLearn device using this firmware, you will need the following core components:
 
 - MCU: An ESP32-S3 development board with a camera connector (specifically a version with 16MB Flash and 8MB PSRAM, like the N16R8).
@@ -49,7 +49,7 @@ To build a NeuraLearn device using this firmware, you will need the following co
 
 - Audio Output: An I2S Amplifier module (e.g., MAX98357A) connected to a small speaker.
 
-## ⚙️ Getting Started
+## Getting Started
 
 #### 1. Clone the Repository
 ```bash
@@ -78,8 +78,8 @@ Using the PlatformIO sidebar:
 
 - Run the `"Upload"` task to flash the main firmware.
 
-## 🤝 Contributing
+## Contributing
 This is a student-led, open-source project. We welcome contributions of all kinds! Whether you're helping us squash bugs, improve our facial animations, or add new features, we'd love to have you. Please feel free to open an issue or submit a pull request.
 
-## 📜 License
+## License
 This project is licensed under the MIT License. See the LICENSE file for details.
