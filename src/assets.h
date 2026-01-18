@@ -1,5 +1,7 @@
 #pragma once
 
+#NOTE: add the array in a .c file instead of this .h
+
 #include "FreeMono12pt7b.h"
 #include "FreeMono18pt7b.h"
 #include "FreeMono9pt7b.h"
