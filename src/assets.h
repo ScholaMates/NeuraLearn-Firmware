@@ -1,3 +1,5 @@
+#pragma once
+
 #include "FreeMono12pt7b.h"
 #include "FreeMono18pt7b.h"
 #include "FreeMono9pt7b.h"
