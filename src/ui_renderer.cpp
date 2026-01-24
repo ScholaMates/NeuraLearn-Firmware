@@ -1,22 +1,10 @@
 #pragma once
 
-#include <TFT_eSPI.h>
 #include <SPI.h>
 #include <LittleFS.h>
 #include "icons_data.h"
 #include "ui_renderer.h"
-
-enum DeviceState {
-  SLEEPING,
-  AWAKENING,
-  LISTENING,
-  THINKING,
-  SPEAKING,
-  HAPPY,
-  POMODORO_FOCUS,
-  SAD_ERROR,
-  DEBUGGING
-};
+#include "types.h"
 
 DeviceState currentState = SLEEPING;
 
@@ -77,7 +65,7 @@ void drawBackground(TFT_eSPI& tft) {
     }
 }
 
-void tft_init(TFT_eSPI& tft) { 
+void tft_init(TFT_eSPI& tft, String FONT_FILENAME) { 
  
   tft.init();
   Serial.println("TFT Initialized.");
@@ -96,7 +84,7 @@ void tft_init(TFT_eSPI& tft) {
   if (tft.fontLoaded) {
     Serial.println("Smooth Font loaded successfully!");
   } else {
-    Serial.println("FATAL: Failed to load font file " FONT_FILENAME);
+    Serial.println("FATAL: Failed to load font file " + FONT_FILENAME);
     tft.setTextFont(4);
   }
 }
