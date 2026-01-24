@@ -89,3 +89,18 @@ void tft_init(TFT_eSPI& tft, String FONT_FILENAME) {
   }
 }
 
+void uiTask(void *pvParameters) {
+    SystemEvent msg;
+    while (true) {
+        // xQueueReceive is like rx.recv(). It BLOCKS this task until data arrives.
+        // This is efficient; it uses 0% CPU while waiting.
+        if (xQueueReceive(eventQueue, &msg, portMAX_DELAY)) {
+            // Match statement equivalent
+            switch(msg.type) {
+                case API_RESPONSE_RECEIVED:
+                    break;
+            }
+        }
+    }
+}
+

@@ -19,7 +19,10 @@ AppConfig globalConfig = {
     .isMuted = false
 };
 
+SemaphoreHandle_t dataMutex;
+
 void setup() {
+  dataMutex = xSemaphoreCreateMutex();
   Serial.begin(115200);
 
  globalConfig.defaultState = LISTENING;
