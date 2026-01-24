@@ -11,25 +11,43 @@ DeviceState currentState = SLEEPING;
 const char* getFaceString(DeviceState state) {
   switch (state) {
     case SLEEPING:
-      return "(⇀‿‿↼)";
+      return "(ᴗ˳ᴗ)ᶻ𝗓𐰁";        // Screen off / Low power
     case AWAKENING:
-      return "(≖‿‿≖)";
+      return "(˶˃ ᵕ ˂˶)";       // Just turned on
     case LISTENING:
-      return "( ⚆_⚆)";
+      return "(⸝⸝ •ᴗ•⸝⸝) ၊၊||၊"; // Waiting for user voice
     case THINKING:
-      return "(✜‿‿✜)";
+      return "( ╹ -╹)?";        // Processing / Talking to server
     case SPEAKING:
-      return "(◕‿‿◕)";
+      return "(•0•)🎤︎︎";         // Replying
     case HAPPY:
-      return "(•‿‿•)";
+      return "( ˶ᵔ ᵕ ᵔ˶)";       // General positive interaction
     case POMODORO_FOCUS:
-      return "(⌐■_■)";
+      return "(╭ರ_•́) ⌕";        // Serious study time
     case SAD_ERROR:
-      return "(╥☁╥ )";
+      return "(⁠╥⁠﹏⁠╥⁠) ⚠︎";      // WiFi failed or API error
+    case CONFUSED:
+      return "(·•᷄ࡇ•᷅ )";       // Didn't understand command
+    case SUCCESS:
+      return "ദ്ദി◝ ⩊ ◜.ᐟ";       // Task completed / WiFi Connected
+    case LOW_BATTERY:
+      return "( ꩜ ᯅ ꩜;)⁭ᵎᵎ";     // Needs charging
+    case SASSY:
+      return "(≖. ≖\")";        // Smart aleck answer / Smug
+    case WAITING:
+      return "( •̯́ ₃ •̯̀)…";       // Idle / Chilling
+    case LOVE:
+      return "₍₍⚞(˶>ᗜ<˶)⚟⁾⁾";    // Good job / Grateful
+    case SURPRISED:
+      return "(˶°ㅁ°)!!";        // Shocked
+    case LAUGHING:
+      return "ꉂ(˵˃ ᗜ ˂˵)";       // Laughing
+    case CHEERING:
+      return "(੭˃ᴗ˂)੭";         // Cheering
     case DEBUGGING:
-      return "(#__#)";
+      return "(#__#)";           // Legacy debug face
     default:
-      return "(☓‿‿☓)"; // A "broken" face for any unknown state
+      return "(☓‿‿☓)";           // Fallback for unknown states
   }
 }
 
