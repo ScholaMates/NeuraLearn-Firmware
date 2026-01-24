@@ -76,3 +76,4 @@ Serial.println("Frame captured, displaying...");
   delay(1);
 }
 
+  

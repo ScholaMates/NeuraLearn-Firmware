@@ -1,0 +1,40 @@
+import re
+import struct
+
+INPUT_TEXT_FILE = "input.txt" # Paste your C-array here
+OUTPUT_BIN_FILE = "bg.bin"
+
+def convert_c_array_to_bin():
+    print(f"Reading C-array from {INPUT_TEXT_FILE}...")
+    try:
+        with open(INPUT_TEXT_FILE, 'r') as f:
+            content = f.read()
+    except FileNotFoundError:
+        print(f"Error: Could not find {INPUT_TEXT_FILE}. Please create it and paste your C-array inside.")
+        return
+
+    # Regex to find all hex values like 0x0000, 0xFFFF, 0x1234
+    # It ignores commas, curly braces, and variable names.
+    hex_values = re.findall(r'0x[0-9a-fA-F]{4}', content)
+    
+    if not hex_values:
+        print("Error: No hex values found (e.g., 0xFFFF). Check format.")
+        return
+
+    print(f"Found {len(hex_values)} pixels. Writing to {OUTPUT_BIN_FILE}...")
+
+    with open(OUTPUT_BIN_FILE, 'wb') as f:
+        for hex_str in hex_values:
+            # Convert string "0xFFFF" to integer 65535
+            val = int(hex_str, 16)
+            
+            # Pack as 16-bit unsigned short (2 bytes)
+            # Use Big Endian ('>H') because most SPI displays expect MSB first.
+            # If colors look swapped (Blue is Red), change this to '<H'.
+            f.write(struct.pack('>H', val))
+
+    print(f"Done! {OUTPUT_BIN_FILE} created.")
+    print(f"Expected Size for 320x240: {320*240*2} bytes ({320*240*2/1024:.1f} KB)")
+    print(f"Actual Size: {len(hex_values) * 2} bytes")
+
+convert_c_array_to_bin()
