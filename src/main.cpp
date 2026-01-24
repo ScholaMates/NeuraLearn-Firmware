@@ -36,7 +36,27 @@ void setup() {
 
   tft_init(tft, FONT_FILENAME);
 
-  drawCurrentFace(tft);
+  // Create Task on Core 0
+    xTaskCreatePinnedToCore(
+        networkTask,   // Function
+        "Network",     // Name
+        8192,          // Stack size (bytes)
+        NULL,          // Params
+        1,             // Priority (Low)
+        NULL,          // Handle
+        0              // CORE 0 ID
+    );
+
+    // Create Task on Core 1
+    xTaskCreatePinnedToCore(
+        uiTask,        // Function
+        "UI",          // Name
+        4096,          // Stack size
+        NULL,          // Params
+        2,             // Priority (High)
+        NULL,          // Handle
+        1              // CORE 1 ID
+    );
 }
 
 void loop() {
