@@ -6,7 +6,6 @@
 #include "ui_renderer.h"
 #include "types.h"
 
-DeviceState currentState = SLEEPING;
 
 const char* getFaceString(DeviceState state) {
   switch (state) {
@@ -54,8 +53,6 @@ const char* getFaceString(DeviceState state) {
 void drawCurrentFace(TFT_eSPI& tft) {
   const char* face = getFaceString(currentState);
 
-  tft.fillRect(0, 50, 320, 140, TFT_BLACK);
-
   tft.setTextColor(TFT_WHITE);
 
   tft.drawString(face, 76, 102);
@@ -63,7 +60,6 @@ void drawCurrentFace(TFT_eSPI& tft) {
 
 void drawHeader(TFT_eSPI& tft) {
   tft.setTextColor(TFT_WHITE);
-  tft.drawString("Device State Display", 160, 25);
 }
 
 void drawBackground(TFT_eSPI& tft) {
@@ -110,10 +106,7 @@ void tft_init(TFT_eSPI& tft, String FONT_FILENAME) {
 void uiTask(void *pvParameters) {
     SystemEvent msg;
     while (true) {
-        // xQueueReceive is like rx.recv(). It BLOCKS this task until data arrives.
-        // This is efficient; it uses 0% CPU while waiting.
         if (xQueueReceive(eventQueue, &msg, portMAX_DELAY)) {
-            // Match statement equivalent
             switch(msg.type) {
                 case API_RESPONSE_RECEIVED:
                     break;

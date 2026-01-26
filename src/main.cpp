@@ -22,21 +22,22 @@ AppConfig globalConfig = {
 SemaphoreHandle_t dataMutex;
 
 void setup() {
-  dataMutex = xSemaphoreCreateMutex();
-  Serial.begin(115200);
+    dataMutex = xSemaphoreCreateMutex();
+    Serial.begin(115200);
 
- globalConfig.defaultState = LISTENING;
- eventQueue = xQueueCreate(10, sizeof(SystemEvent)); 
+    DeviceState currentState = globalConfig.defaultState;
 
-  if (!LittleFS.begin()) {
+    eventQueue = xQueueCreate(10, sizeof(SystemEvent)); 
+
+    if (!LittleFS.begin()) {
     Serial.println("FATAL: LittleFS Mount Failed.");
     return;
-  }
-  Serial.println("LittleFS Mounted Successfully.");
+    }
+    Serial.println("LittleFS Mounted Successfully.");
 
-  tft_init(tft, FONT_FILENAME);
+    tft_init(tft, FONT_FILENAME);
 
-  // Create Task on Core 0
+    // Create Task on Core 0
     xTaskCreatePinnedToCore(
         networkTask,   // Function
         "Network",     // Name

@@ -15,5 +15,6 @@ extern DeviceState currentState;
 extern AppConfig globalConfig;
 extern QueueHandle_t eventQueue;
 extern SemaphoreHandle_t dataMutex;
+extern int currentBatteryLevel;
 
 const char* getFaceString(DeviceState state);
