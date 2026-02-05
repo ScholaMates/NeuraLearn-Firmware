@@ -1,5 +1,3 @@
-#pragma once
-
 #include <Arduino.h>
 #include <TFT_eSPI.h>
 #include <SPI.h>
@@ -20,6 +18,7 @@ AppConfig globalConfig = {
 };
 
 SemaphoreHandle_t dataMutex;
+GlobalState state;
 
 void setup() {
     dataMutex = xSemaphoreCreateMutex();
@@ -53,7 +52,7 @@ void setup() {
         uiTask,        // Function
         "UI",          // Name
         4096,          // Stack size
-        NULL,          // Params
+        &tft,          // Params
         2,             // Priority (High)
         NULL,          // Handle
         1              // CORE 1 ID
@@ -63,4 +62,3 @@ void setup() {
 void loop() {
 
 }
-

@@ -1,5 +1,3 @@
-#pragma once
-
 #include <SPI.h>
 #include <LittleFS.h>
 #include "icons_data.h"
@@ -50,9 +48,9 @@ const char* getFaceString(DeviceState state) {
   }
 }
 
-void drawCurrentFace(TFT_eSPI& tft) {
-  const char* face = getFaceString(currentState);
-
+void drawCurrentFace(TFT_eSPI& tft, GlobalState& state) {
+  const char* face = getFaceString(state.mood);
+  
   tft.setTextColor(TFT_WHITE);
 
   tft.drawString(face, 76, 102);
@@ -64,6 +62,7 @@ void drawHeader(TFT_eSPI& tft) {
 
 void drawBackground(TFT_eSPI& tft) {
     fs::File f = LittleFS.open("/bg.bin", "r");
+    if (!f || f.size() == 0) return;
     size_t len = f.size();
     
     // Allocate buffer in PSRAM (not internal RAM)
@@ -83,6 +82,7 @@ void tft_init(TFT_eSPI& tft, String FONT_FILENAME) {
  
   tft.init();
   Serial.println("TFT Initialized.");
+  Serial.flush();
 
   tft.fillScreen(0x0);
   tft.setRotation(0);
@@ -104,20 +104,28 @@ void tft_init(TFT_eSPI& tft, String FONT_FILENAME) {
 }
 
 void uiTask(void *pvParameters) {
+    Serial.println("UI Task Started.");
+    if (pvParameters == NULL) {
+        Serial.println("UI Task: pvParameters is NULL");
+        vTaskDelete(NULL);
+    }
     SystemEvent msg;
     while (true) {
+      Serial.println("UI Task waiting for events...");
         if (xQueueReceive(eventQueue, &msg, portMAX_DELAY)) {
+            Serial.println("UI Task received event.");
             switch(msg.type) {
                 case UPDATE_FACE_MOOD:
-                    drawCurrentFace(*(TFT_eSPI*)pvParameters);
+                    drawCurrentFace(*(TFT_eSPI*)pvParameters, state);
                     break;
                 case PLAY_AUDIO_CHUNK:
                     break;
                 case EVENT_CAMERA_TRIGGER:
                     break;
-
+                case TEST_EVENT:
+                    Serial.println(String("UI Task received test event: ") + msg.stringData);
+                    break;
             }
         }
     }
 }
-

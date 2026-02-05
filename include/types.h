@@ -39,7 +39,10 @@ enum EventType {
     // Action Events
     UPDATE_FACE_MOOD,         // Command UI to change face
     PLAY_AUDIO_CHUNK,         // Command Audio to play
-    EVENT_CAMERA_TRIGGER      // Command Camera to snap
+    EVENT_CAMERA_TRIGGER,      // Command Camera to snap
+
+    // Test Events
+    TEST_EVENT                // For Debugging
 };
 
 // Events sent between tasks
@@ -76,9 +79,6 @@ struct GlobalState {
 // Global States and Queues
 
 extern GlobalState state;
-extern SemaphoreHandle_t stateMutex; // The "Arc<Mutex>"
-
+extern SemaphoreHandle_t dataMutex;
 extern AppConfig globalConfig;
-
-extern QueueHandle_t logicQueue; // Core 0 Input (Commands)
-extern QueueHandle_t uiQueue;    // Core 1 Input (Visuals)
+extern QueueHandle_t eventQueue;
