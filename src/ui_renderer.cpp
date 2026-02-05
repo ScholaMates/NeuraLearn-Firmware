@@ -108,8 +108,14 @@ void uiTask(void *pvParameters) {
     while (true) {
         if (xQueueReceive(eventQueue, &msg, portMAX_DELAY)) {
             switch(msg.type) {
-                case API_RESPONSE_RECEIVED:
+                case UPDATE_FACE_MOOD:
+                    drawCurrentFace(*(TFT_eSPI*)pvParameters);
                     break;
+                case PLAY_AUDIO_CHUNK:
+                    break;
+                case EVENT_CAMERA_TRIGGER:
+                    break;
+
             }
         }
     }
