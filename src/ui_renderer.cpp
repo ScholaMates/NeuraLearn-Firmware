@@ -104,6 +104,7 @@ void tft_init(TFT_eSPI& tft, String FONT_FILENAME) {
 }
 
 void uiTask(void *pvParameters) {
+  TFT_eSPI tft = *(TFT_eSPI*)pvParameters;
     Serial.println("UI Task Started.");
     if (pvParameters == NULL) {
         Serial.println("UI Task: pvParameters is NULL");
