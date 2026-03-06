@@ -1,4 +1,5 @@
 {
     "terminal.integrated.fontFamily": "FiraCode-SemiBold",
-    "terminal.integrated.fontLigatures.enabled": true
+    "terminal.integrated.fontLigatures.enabled": true,
+    "vscord.enable": false
 }

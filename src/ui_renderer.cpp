@@ -5,6 +5,7 @@
 #include "types.h"
 
 
+
 const char* getFaceString(DeviceState state) {
   switch (state) {
     case SLEEPING:
@@ -53,11 +54,7 @@ void drawCurrentFace(TFT_eSPI& tft, GlobalState& state) {
   
   tft.setTextColor(TFT_WHITE);
 
-  tft.drawString(face, 76, 102);
-}
-
-void drawHeader(TFT_eSPI& tft) {
-  tft.setTextColor(TFT_WHITE);
+  tft.drawString(face, 72, 135);
 }
 
 void drawBackground(TFT_eSPI& tft) {
@@ -65,15 +62,16 @@ void drawBackground(TFT_eSPI& tft) {
     if (!f || f.size() == 0) return;
     size_t len = f.size();
     
-    // Allocate buffer in PSRAM (not internal RAM)
     uint16_t* bgBuffer = (uint16_t*) ps_malloc(len);
+    Serial.println("Background buffer allocated.");
     
     if (bgBuffer) {
         f.read((uint8_t*)bgBuffer, len);
         f.close();
         
-        tft.pushImage(0, 0, 320, 240, bgBuffer);
+        tft.pushImage(10, 22, 460, 276, bgBuffer);
         
+        Serial.println("Background drawn to TFT.");
         free(bgBuffer); 
     }
 }
@@ -85,7 +83,7 @@ void tft_init(TFT_eSPI& tft, String FONT_FILENAME) {
   Serial.flush();
 
   tft.fillScreen(0x0);
-  tft.setRotation(0);
+  tft.setRotation(-1);
 
   drawBackground(tft);
   Serial.println("Background initialized.");
@@ -103,6 +101,29 @@ void tft_init(TFT_eSPI& tft, String FONT_FILENAME) {
   }
 }
 
+void render_battery_icon(TFT_eSPI& tft, GlobalState& state) {
+    switch (state.batteryLevel) {
+        case 0 ... 10:
+            tft.pushImage(409, 22, 24, 45, image_Battery_Dead_pixels);
+            break;
+        case 11 ... 30:
+            tft.pushImage(409, 20, 24, 16, image_Battery_1_pixels);
+            break;
+        case 31 ... 60:
+            tft.pushImage(409, 20, 24, 16, image_Battery_2_pixels);
+            break;
+        case 61 ... 90:
+            tft.pushImage(409, 20, 24, 16, image_Battery_4_pixels);
+            break;
+        case 91 ... 100:
+            tft.pushImage(409, 22, 24, 45, image_Battery_full_pixels);
+            break;
+        default:
+            tft.pushImage(409, 22, 24, 45, image_Battery_Dead_pixels);
+            break;
+    }
+}
+
 void uiTask(void *pvParameters) {
   TFT_eSPI tft = *(TFT_eSPI*)pvParameters;
     Serial.println("UI Task Started.");
@@ -112,6 +133,8 @@ void uiTask(void *pvParameters) {
     }
     SystemEvent msg;
     while (true) {
+      render_battery_icon(tft, state);
+      drawCurrentFace(tft, state);
       Serial.println("UI Task waiting for events...");
         if (xQueueReceive(eventQueue, &msg, portMAX_DELAY)) {
             Serial.println("UI Task received event.");
@@ -125,6 +148,13 @@ void uiTask(void *pvParameters) {
                     break;
                 case TEST_EVENT:
                     Serial.println(String("UI Task received test event: ") + msg.stringData);
+                    break;
+                case WAKE_WORD_DETECTED:
+                    state.mood = LISTENING;
+                    Serial.println("UI Task: Wake word detected.");
+                    break;
+                default:
+                    Serial.println("UI Task: Unknown event type received.");
                     break;
             }
         }
