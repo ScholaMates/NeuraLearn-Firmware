@@ -9,7 +9,7 @@
 #include "logic_fn.h"
 #include "icons_data.h"
 
-#define FONT_FILENAME "DejaVuSansMono-Bold-40"
+#define FONT_FILENAME "DejaVuSansMono-Bold-10"
 
 TFT_eSPI tft = TFT_eSPI();
 QueueHandle_t eventQueue;

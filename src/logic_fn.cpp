@@ -5,39 +5,88 @@
 #include <WiFiClientSecure.h>
 #include <WiFiManager.h>
 #include <ArduinoJson.h>
+#include <HTTPClient.h>
+#include "esp_camera.h"
 
+// --- Audio Libraries ---
+#include "AudioFileSource.h"
+#include "AudioFileSourceHTTPStream.h"
+#include "AudioGeneratorWAV.h" 
+#include "AudioOutputI2S.h"
 #include <fabiocanavarro-project-1_inferencing.h> 
 
 // --- NeuraLearn Backend API ---
 const char* API_HOST = "neuralearnapp.vercel.app";
 const char* AUDIO_API_PATH = "/api/v1/chat/audio";
+const char* VISION_API_PATH = "/api/v1/vision/analyze"; 
 const char* TEST_USER_ID = "705c2277-75d9-4a2a-97cf-84634d3c4d4c"; 
+String currentChatId = ""; 
 
-// --- I2S Microphone Pins ---
+// --- Config & Pins ---
 #define I2S_MIC_SCK 39
 #define I2S_MIC_WS  38
 #define I2S_MIC_SD  47
-#define I2S_PORT    I2S_NUM_0
+#define I2S_PORT_MIC I2S_NUM_0
+#define I2S_SPK_BCLK 41
+#define I2S_SPK_LRC  42  
+#define I2S_SPK_DIN  40  
 
-// --- Reactive Recording Tuning ---
+#define PWDN_GPIO_NUM  -1
+#define RESET_GPIO_NUM -1
+#define XCLK_GPIO_NUM  15
+#define SIOD_GPIO_NUM  4
+#define SIOC_GPIO_NUM  5
+#define Y9_GPIO_NUM    16
+#define Y8_GPIO_NUM    17
+#define Y7_GPIO_NUM    18
+#define Y6_GPIO_NUM    12
+#define Y5_GPIO_NUM    10
+#define Y4_GPIO_NUM    8
+#define Y3_GPIO_NUM    9
+#define Y2_GPIO_NUM    11
+#define VSYNC_GPIO_NUM 6
+#define HREF_GPIO_NUM  7
+#define PCLK_GPIO_NUM  13
+
 #define CONFIDENCE_THRESHOLD 0.60f   
 #define COOLDOWN_MS 3000 
-#define MAX_RECORD_TIME_MS 15000   // Absolute maximum cut-off
-#define SILENCE_TIMEOUT_MS 1500    // Stop recording after x amount seconds of silence
-#define SILENCE_THRESHOLD 150      // Volume threshold (0-32768). Adjust if it cuts off too early!
+#define MAX_RECORD_TIME_MS 15000   
+#define SILENCE_TIMEOUT_MS 1500    
+#define SILENCE_THRESHOLD 150      
 
-// ML Buffers
 int16_t *inference_buffer; 
 size_t chunk_size = 512;
 int32_t *i2s_read_buff;
 
-// Edge Impulse Callback
+AudioGeneratorWAV *wav; 
+AudioFileSource *file; 
+AudioOutputI2S *out;
+
+void dispatchMoodUpdate(DeviceState newMood) {
+    // Safely mutate the shared state
+    state.mood = newMood;
+    
+    // Build the message
+    SystemEvent ev;
+    ev.type = UPDATE_FACE_MOOD;
+    ev.stringData = nullptr;
+    
+    // Fire the hardware interrupt to wake up Core 1!
+    xQueueSend(eventQueue, &ev, portMAX_DELAY);
+}
+
+void dispatchCameraCountdown(const char* text) {
+    SystemEvent ev;
+    ev.type = EVENT_CAMERA_TRIGGER;
+    ev.stringData = strdup(text); // Heap allocate so it survives the queue jump
+    xQueueSend(eventQueue, &ev, portMAX_DELAY);
+}
+
 int microphone_audio_signal_get_data(size_t offset, size_t length, float *out_ptr) {
     numpy::int16_to_float(inference_buffer + offset, out_ptr, length);
     return 0;
 }
 
-// Wifi Manager
 WiFiManager wifiManager;
 WiFiServer server(80);
 bool wifiConnected = false;
@@ -46,73 +95,241 @@ const int WIFI_RETRY_LIMIT = 5;
 const char *WIFI_SSID = "NeuraLearn";
 const char *WIFI_PASSWORD = "12345678";
 
-
-void setupWiFi()
-{
-    Serial.println("Event: Connecting to WiFi");
+void setupWiFi() {
+    Serial.println("Info: [NETWORK] Connecting to WiFi");
     wifiManager.setConfigPortalTimeout(1000000000);
     wifiManager.setBreakAfterConfig(false);
 
     while (!wifiConnected) {
-        if (!wifiManager.autoConnect(WIFI_SSID, WIFI_PASSWORD))
-        {
-            if (wifiRetryCount < WIFI_RETRY_LIMIT)
-            {
-                Serial.println("Warning: Failed to connect to WiFi, retrying...");
+        if (!wifiManager.autoConnect(WIFI_SSID, WIFI_PASSWORD)) {
+            if (wifiRetryCount < WIFI_RETRY_LIMIT) {
                 wifiConnected = false;
                 wifiRetryCount +=1;
                 delay(2000);
-                continue;
-            }
-            else
-            {
-                Serial.println("Warning: Failed to connect");
-                Serial.println("Important Event: Resetting WiFi settings and restarting ESP...");
+            } else {
                 wifiManager.resetSettings();
                 ESP.restart();
             }
-        }
-        else 
-        {
+        } else {
             wifiConnected = true;
         }
     }
-    Serial.println("Event: WiFi connected");
-    Serial.println("\tIP address: " + WiFi.localIP().toString());
-    server.begin();
+    Serial.println("Info: [NETWORK] WiFi connected!");
 }
 
-// Reactive Audio Streamer
-void recordAndSendAudioToAPI() {
-    Serial.println("\n[SYSTEM] -> Wake word triggered! Reactive stream started...");
+class AudioFileSourceInsecureHTTPS : public AudioFileSource {
+protected:
+    HTTPClient http;
+    WiFiClientSecure client;
+    uint32_t size;
+    uint32_t pos;
+    bool opened;
+
+public:
+    AudioFileSourceInsecureHTTPS(const char* url) {
+        client.setInsecure(); 
+        http.begin(client, url);
+        int httpCode = http.GET();
+        if (httpCode == HTTP_CODE_OK || httpCode == HTTP_CODE_MOVED_PERMANENTLY) {
+            size = http.getSize();
+            opened = true;
+        } else {
+            opened = false;
+            size = 0;
+        }
+        pos = 0;
+    }
+    virtual ~AudioFileSourceInsecureHTTPS() { http.end(); }
+    virtual uint32_t read(void *data, uint32_t len) override {
+        if (!opened) return 0;
+        WiFiClient *stream = http.getStreamPtr();
+        if (!stream) return 0;
+        uint32_t bytesRead = 0;
+        uint8_t *buf = (uint8_t*)data;
+        unsigned long timeout = millis();
+        while (bytesRead < len && http.connected()) {
+            if (stream->available()) {
+                int r = stream->read(buf + bytesRead, len - bytesRead);
+                if (r > 0) { bytesRead += r; pos += r; timeout = millis(); }
+            } else {
+                if (millis() - timeout > 5000) break;
+                vTaskDelay(pdMS_TO_TICKS(2));
+            }
+        }
+        return bytesRead;
+    }
+    virtual uint32_t readNonBlock(void *data, uint32_t len) override { return read(data, len); }
+    virtual bool seek(int32_t newPos, int dir) override {
+        if (!opened) return false;
+        if (dir == 1) newPos = pos + newPos;
+        if (newPos < pos) return false;
+        uint32_t bytesToSkip = newPos - pos;
+        if (bytesToSkip == 0) return true;
+        WiFiClient *stream = http.getStreamPtr();
+        if (!stream) return false;
+        uint8_t trash[128];
+        while (bytesToSkip > 0 && http.connected()) {
+            uint32_t readLen = (bytesToSkip > sizeof(trash)) ? sizeof(trash) : bytesToSkip;
+            unsigned long timeout = millis();
+            while (!stream->available() && http.connected()) {
+                if (millis() - timeout > 5000) return false;
+                vTaskDelay(pdMS_TO_TICKS(2));
+            }
+            int r = stream->read(trash, readLen);
+            if (r > 0) { bytesToSkip -= r; pos += r; } else { return false; }
+        }
+        return true;
+    }
+    virtual bool close() override { http.end(); opened = false; return true; }
+    virtual bool isOpen() override { return opened; }
+    virtual uint32_t getSize() override { return size; }
+    virtual uint32_t getPos() override { return pos; }
+};
+
+void playAudioResponse(const char* wav_url) {
+    Serial.println("\nInfo: [SYSTEM] -> 🔊 Playing Audio Response...");
     
-    if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("[ERROR] WiFi Disconnected!");
+    // Notify user the AI is actively talking
+    dispatchMoodUpdate(SPEAKING);
+
+    out = new AudioOutputI2S(1, AudioOutputI2S::EXTERNAL_I2S); 
+    out->SetPinout(I2S_SPK_BCLK, I2S_SPK_LRC, I2S_SPK_DIN);
+    out->SetGain(0.8); 
+    out->SetOutputModeMono(true);
+
+    file = new AudioFileSourceInsecureHTTPS(wav_url);
+    wav = new AudioGeneratorWAV(); 
+    
+    if (wav->begin(file, out)) {
+        while (wav->isRunning()) {
+            if (!wav->loop()) wav->stop();
+            vTaskDelay(pdMS_TO_TICKS(2));
+        }
+    }
+    delete wav;
+    delete file;
+    delete out;
+
+    // Audio finished, return to idle state
+    dispatchMoodUpdate(WAITING);
+}
+
+void takePictureAndSend() {
+    Serial.println("\nInfo: [CAMERA] Waking up hardware via Just-In-Time Allocation...");
+    
+    //  Alert user camera sequence has begun
+    dispatchMoodUpdate(POMODORO_FOCUS); 
+
+    camera_config_t config;
+    config.ledc_channel = LEDC_CHANNEL_0;
+    config.ledc_timer = LEDC_TIMER_0;
+    config.pin_d0 = Y2_GPIO_NUM;
+    config.pin_d1 = Y3_GPIO_NUM;
+    config.pin_d2 = Y4_GPIO_NUM;
+    config.pin_d3 = Y5_GPIO_NUM;
+    config.pin_d4 = Y6_GPIO_NUM;
+    config.pin_d5 = Y7_GPIO_NUM;
+    config.pin_d6 = Y8_GPIO_NUM;
+    config.pin_d7 = Y9_GPIO_NUM;
+    config.pin_xclk = XCLK_GPIO_NUM;
+    config.pin_pclk = PCLK_GPIO_NUM;
+    config.pin_vsync = VSYNC_GPIO_NUM;
+    config.pin_href = HREF_GPIO_NUM;
+    config.pin_sccb_sda = SIOD_GPIO_NUM;
+    config.pin_sccb_scl = SIOC_GPIO_NUM;
+    config.pin_pwdn = PWDN_GPIO_NUM;
+    config.pin_reset = RESET_GPIO_NUM;
+    config.xclk_freq_hz = 20000000;
+    config.frame_size = FRAMESIZE_VGA; 
+    config.pixel_format = PIXFORMAT_JPEG; 
+    config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
+    config.fb_location = CAMERA_FB_IN_PSRAM; 
+    config.jpeg_quality = 12; 
+    config.fb_count = 1;
+
+    esp_err_t err = esp_camera_init(&config);
+    if (err != ESP_OK) return;
+    
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    // Render the physical countdown over the face
+    for (int i = 3; i > 0; i--) {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%d...", i);
+        dispatchCameraCountdown(buf);
+        vTaskDelay(pdMS_TO_TICKS(1000)); 
+    }
+    dispatchCameraCountdown("SNAP!");
+
+    camera_fb_t * fb = esp_camera_fb_get();
+    if (!fb) {
+        esp_camera_deinit();
         return;
     }
+
+    String jsonResponse = "";
+    if (WiFi.status() == WL_CONNECTED) {
+        HTTPClient http;
+        WiFiClientSecure client;
+        client.setInsecure();
+
+        // Tell user we are transmitting massive image and waiting for AI
+        dispatchMoodUpdate(THINKING);
+
+        http.setTimeout(30000); 
+        http.begin(client, String("https://") + API_HOST + VISION_API_PATH);
+        
+        http.addHeader("Content-Type", "image/jpeg");
+        http.addHeader("x-user-id", TEST_USER_ID);
+        if (currentChatId.length() > 0) http.addHeader("x-chat-id", currentChatId);
+
+        int httpResponseCode = http.POST(fb->buf, fb->len);
+        if (httpResponseCode == 200 || httpResponseCode == 201) {
+            jsonResponse = http.getString();
+        }
+        http.end();
+    }
+
+    esp_camera_fb_return(fb);
+    esp_camera_deinit();
+
+    if (jsonResponse.length() > 0) {
+        JsonDocument resDoc;
+        if (!deserializeJson(resDoc, jsonResponse) && resDoc.containsKey("audio_url")) {
+            playAudioResponse(resDoc["audio_url"]);
+        }
+    }
+}
+
+void recordAndSendAudioToAPI() {
+    Serial.println("\nInfo: [SYSTEM] -> Wake word triggered! Reactive stream started...");
+    
+    // WAKE_WORD_DETECTED will automatically set mood to LISTENING in Core 1
+    SystemEvent wakeEv;
+    wakeEv.type = WAKE_WORD_DETECTED;
+    xQueueSend(eventQueue, &wakeEv, portMAX_DELAY);
+
+    if (WiFi.status() != WL_CONNECTED) return;
 
     WiFiClientSecure client;
     client.setInsecure(); 
 
-    if (!client.connect(API_HOST, 443)) {
-        Serial.println("[ERROR] Connection to server failed!");
-        return;
-    }
+    if (!client.connect(API_HOST, 443)) return;
 
-    // --- 1. CHUNKED HTTP HEADERS ---
-    // We do NOT send Content-Length. We tell Vercel we are streaming chunk by chunk.
     client.print(String("POST ") + AUDIO_API_PATH + " HTTP/1.1\r\n");
     client.print(String("Host: ") + API_HOST + "\r\n");
     client.print("Content-Type: application/octet-stream\r\n");
-    client.print(String("X-User-Id: ") + TEST_USER_ID + "\r\n");
-    client.print("Transfer-Encoding: chunked\r\n"); // THE MAGIC KEY
+    client.print(String("x-user-id: ") + TEST_USER_ID + "\r\n");
+    
+    if (currentChatId.length() > 0) client.print("x-chat-id: " + currentChatId + "\r\n");
+
+    client.print("Transfer-Encoding: chunked\r\n"); 
     client.print("Connection: close\r\n\r\n"); 
 
     int32_t *temp_i2s_chunk = (int32_t*)malloc(chunk_size * sizeof(int32_t));
     int16_t *pcm_16_chunk = (int16_t*)malloc(chunk_size * sizeof(int16_t));
     
     if (!temp_i2s_chunk || !pcm_16_chunk) {
-        Serial.println("[ERROR] Failed to allocate streaming chunks!");
         if(temp_i2s_chunk) free(temp_i2s_chunk);
         if(pcm_16_chunk) free(pcm_16_chunk);
         client.stop();
@@ -121,86 +338,77 @@ void recordAndSendAudioToAPI() {
 
     unsigned long start_time = millis();
     int silent_chunks = 0;
-    
-    // Math: 16000 samples per sec = 16 samples per millisecond.
-    // How many chunks make up our silence timeout?
     int max_silent_chunks = (SILENCE_TIMEOUT_MS * 16) / chunk_size;
-    
-    Serial.println("[SYSTEM] -> Recording & Streaming live (Speak now!)...");
-
     size_t bytes_read = 0;
 
-    // --- 2. DYNAMIC STREAMING LOOP ---
     while (millis() - start_time < MAX_RECORD_TIME_MS) {
-        i2s_read(I2S_PORT, temp_i2s_chunk, chunk_size * sizeof(int32_t), &bytes_read, portMAX_DELAY);
+        i2s_read(I2S_PORT_MIC, temp_i2s_chunk, chunk_size * sizeof(int32_t), &bytes_read, portMAX_DELAY);
         size_t samples_read = bytes_read / sizeof(int32_t);
-
         long sum_amplitude = 0;
 
         for (size_t i = 0; i < samples_read; i++) {
             pcm_16_chunk[i] = (int16_t)(temp_i2s_chunk[i] >> 14); 
-            sum_amplitude += abs(pcm_16_chunk[i]); // Calculate absolute volume
+            sum_amplitude += abs(pcm_16_chunk[i]); 
         }
         
-        // --- VOICE ACTIVITY DETECTION (VAD) ---
         int avg_volume = sum_amplitude / samples_read;
-        if (avg_volume < SILENCE_THRESHOLD) {
-            silent_chunks++;
-        } else {
-            silent_chunks = 0; // Reset if user speaks again!
-        }
+        if (avg_volume < SILENCE_THRESHOLD) silent_chunks++;
+        else silent_chunks = 0; 
 
-        // --- CHUNKED TRANSFER ENCODING PROTOCOL ---
-        // Format: [Size in HEX]\r\n [Binary Data] \r\n
         size_t bytes_to_send = samples_read * sizeof(int16_t);
         client.print(String(bytes_to_send, HEX) + "\r\n");
         client.write((uint8_t*)pcm_16_chunk, bytes_to_send);
         client.print("\r\n");
 
-        // --- EXIT CONDITION ---
-        if (silent_chunks >= max_silent_chunks) {
-            Serial.printf("[SYSTEM] -> Silence detected (avg vol: %d). Stopping stream.\n", avg_volume);
-            break;
-        }
+        if (silent_chunks >= max_silent_chunks) break;
     }
 
-    if (millis() - start_time >= MAX_RECORD_TIME_MS) {
-        Serial.println("[SYSTEM] -> Maximum time reached. Stopping stream.");
-    }
-
-    // --- 3. END THE STREAM ---
-    // A 0-byte chunk tells the server "I am done talking."
     client.print("0\r\n\r\n");
+    Serial.println("Info: [SYSTEM] -> ⏹️ Stream closed. Waiting for AI response...");
 
-    Serial.println("[SYSTEM] -> Stream closed. Waiting for AI response...");
+    // User stopped talking. Waiting on Gemini.
+    dispatchMoodUpdate(THINKING);
 
-    // --- 4. Read the Backend Response ---
+    String jsonResponse = "";
     unsigned long timeout = millis();
     while (client.connected() && millis() - timeout < 20000) {
         if (client.available()) {
             String line = client.readStringUntil('\n');
-            Serial.println(line);
+            if (line.startsWith("{")) jsonResponse = line;
             timeout = millis();
         }
-        
-        // THE CRITICAL FIX: Yield to FreeRTOS so the Watchdog doesn't starve
         vTaskDelay(pdMS_TO_TICKS(10)); 
     }
-
-    Serial.println("\n========================================");
-    Serial.println("[NeuraLearn API Streaming Cycle Complete]");
 
     client.stop();
     free(temp_i2s_chunk);
     free(pcm_16_chunk);
     
-    Serial.println("[SYSTEM] -> Resuming Wake Word listening...\n");
+    bool shouldTakePicture = false;
+
+    if (jsonResponse.length() > 0) {
+        JsonDocument resDoc;
+        DeserializationError error = deserializeJson(resDoc, jsonResponse);
+        if (!error) {
+            if (resDoc.containsKey("chat_id")) currentChatId = resDoc["chat_id"].as<String>();
+            if (resDoc.containsKey("action") && resDoc["action"] == "TAKE_PICTURE") shouldTakePicture = true;
+            if (resDoc.containsKey("audio_url")) playAudioResponse(resDoc["audio_url"]);
+        }
+    }
+
+    if (shouldTakePicture) takePictureAndSend();
+
+    i2s_zero_dma_buffer(I2S_PORT_MIC);
+    
+    // Reset to neutral after full cycle completes
+    dispatchMoodUpdate(WAITING);
 }
 
 void networkTask(void *pvParameters) {
-    Serial.println("Logic Task started on Core 0");
+    Serial.println("Info: Logic Task started on Core 0");
 
     setupWiFi();
+    dispatchMoodUpdate(WAITING); // System initialized, ready for commands
 
     i2s_config_t i2s_config = {
         .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
@@ -223,9 +431,9 @@ void networkTask(void *pvParameters) {
         .data_in_num = I2S_MIC_SD
     };
 
-    i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
-    i2s_set_pin(I2S_PORT, &pin_config);
-    i2s_zero_dma_buffer(I2S_PORT);
+    i2s_driver_install(I2S_PORT_MIC, &i2s_config, 0, NULL);
+    i2s_set_pin(I2S_PORT_MIC, &pin_config);
+    i2s_zero_dma_buffer(I2S_PORT_MIC);
 
     inference_buffer = (int16_t*)malloc(EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE * sizeof(int16_t));
     i2s_read_buff = (int32_t*)malloc(chunk_size * sizeof(int32_t));
@@ -233,10 +441,8 @@ void networkTask(void *pvParameters) {
     unsigned long last_trigger_time = 0;
     size_t bytes_read = 0;
 
-    Serial.println("Listening for Wake Word...");
-
     while (true) {
-        i2s_read(I2S_PORT, i2s_read_buff, chunk_size * sizeof(int32_t), &bytes_read, portMAX_DELAY);
+        i2s_read(I2S_PORT_MIC, i2s_read_buff, chunk_size * sizeof(int32_t), &bytes_read, portMAX_DELAY);
         int samples_read = bytes_read / sizeof(int32_t);
 
         numpy::roll(inference_buffer, EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE, -samples_read);
@@ -266,13 +472,9 @@ void networkTask(void *pvParameters) {
                     unsigned long now = millis();
                     if (now - last_trigger_time > COOLDOWN_MS) {
                         last_trigger_time = now;
-                        
-                        Serial.printf("\nWAKE DETECTED! (Score: %.2f)\n", result.classification[ix].value);
-                        
                         recordAndSendAudioToAPI();
-
                         memset(inference_buffer, 0, EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE * sizeof(int16_t));
-                        i2s_zero_dma_buffer(I2S_PORT);
+                        i2s_zero_dma_buffer(I2S_PORT_MIC);
                     }
                 }
             }
