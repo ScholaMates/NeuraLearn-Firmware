@@ -27,29 +27,30 @@ enum DeviceState {
 // Types of events that can be sent between tasks
 enum EventType {
     // Input Events
-    EVENT_BUTTON_CLICK,       // Short Press
-    EVENT_BUTTON_LONG_PRESS,  // For Sleep
-    EVENT_BUTTON_DOUBLE_CLICK,// For Manual Camera
-    WAKE_WORD_DETECTED,       // "Hey Buddy"
+    EVENT_BUTTON_CLICK,       
+    EVENT_BUTTON_LONG_PRESS,  
+    EVENT_BUTTON_DOUBLE_CLICK,
+    WAKE_WORD_DETECTED,       
     
     // System Events
-    API_RESPONSE_RECEIVED,    // JSON parsed
-    EVENT_AI_REPLY_RECEIVED,  // Ready to speak
+    API_RESPONSE_RECEIVED,    
+    EVENT_AI_REPLY_RECEIVED,  
+    EVENT_TELEMETRY_UPDATE,
     
     // Action Events
-    UPDATE_FACE_MOOD,         // Command UI to change face
-    PLAY_AUDIO_CHUNK,         // Command Audio to play
-    EVENT_CAMERA_TRIGGER,      // Command Camera to snap
+    UPDATE_FACE_MOOD,         
+    PLAY_AUDIO_CHUNK,         
+    EVENT_CAMERA_TRIGGER,      
 
     // Test Events
-    TEST_EVENT                // For Debugging
+    TEST_EVENT                
 };
 
 // Events sent between tasks
 struct SystemEvent {
     EventType type;
-    int value;           // Optional: Battery %, Error Code, etc.
-    char* stringData;    // Optional: Heap-allocated string (e.g., TTS Text)
+    int value;           
+    char* stringData;    
 };
 
 // Configuration (Saved in website preferences)
@@ -59,8 +60,7 @@ struct AppConfig {
     bool isMuted;
 }; 
 
-// Shared State (Should be Protected by Mutex)
-// Updated every 30 seconds by Logic Task
+// Shared State (Protected by Mutex/Queue architecture)
 struct GlobalState {
     int batteryLevel;       // 0-100
     int wifiStrength;       // RSSI
@@ -69,14 +69,12 @@ struct GlobalState {
     bool isConnectedToWifi;
     bool isConnectedToServer;
     
-    bool isPlayingAudio;    // Lock: Logic sets true, UI shows speaking mouth
-    bool isListening;       // Lock: Logic sets true, UI shows ear icon
+    bool isPlayingAudio;    // True = Speaking Icon, False = Muted Icon
+    bool isListening;       // True = Mic Enabled Icon, False = Mic Disabled Icon
     
-    time_t lastNtpSync;     // Unix Timestamp
-    time_t pomodoroEndTime; // 0 = Off. Timestamp = Target End Time.
+    time_t lastNtpSync;     
+    time_t pomodoroEndTime; 
 };
-
-// Global States and Queues
 
 extern GlobalState state;
 extern SemaphoreHandle_t dataMutex;

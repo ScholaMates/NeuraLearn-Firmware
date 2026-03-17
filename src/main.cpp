@@ -96,7 +96,6 @@ void setup() {
     tft_init(tft, FONT_FILENAME);
 
     drawBackground(tft);
-
     // Create Task on Core 0
     xTaskCreatePinnedToCore(
         networkTask,   // Function
@@ -119,7 +118,6 @@ void setup() {
         1              // CORE 1 ID
     );
 }
-
 void loop() {
 
 }

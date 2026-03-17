@@ -6,6 +6,7 @@
 #include <WiFiManager.h>
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
+#include <time.h>
 #include "esp_camera.h"
 
 // --- Audio Libraries ---
@@ -15,7 +16,6 @@
 #include "AudioOutputI2S.h"
 #include <fabiocanavarro-project-1_inferencing.h> 
 
-// --- NeuraLearn Backend API ---
 const char* API_HOST = "neuralearnapp.vercel.app";
 const char* AUDIO_API_PATH = "/api/v1/chat/audio";
 const char* VISION_API_PATH = "/api/v1/vision/analyze"; 
@@ -48,7 +48,7 @@ String currentChatId = "";
 #define HREF_GPIO_NUM  7
 #define PCLK_GPIO_NUM  13
 
-#define CONFIDENCE_THRESHOLD 0.60f   
+#define CONFIDENCE_THRESHOLD 0.80f   
 #define COOLDOWN_MS 3000 
 #define MAX_RECORD_TIME_MS 15000   
 #define SILENCE_TIMEOUT_MS 1500    
@@ -63,22 +63,25 @@ AudioFileSource *file;
 AudioOutputI2S *out;
 
 void dispatchMoodUpdate(DeviceState newMood) {
-    // Safely mutate the shared state
     state.mood = newMood;
-    
-    // Build the message
     SystemEvent ev;
     ev.type = UPDATE_FACE_MOOD;
     ev.stringData = nullptr;
-    
-    // Fire the hardware interrupt to wake up Core 1!
     xQueueSend(eventQueue, &ev, portMAX_DELAY);
 }
 
 void dispatchCameraCountdown(const char* text) {
     SystemEvent ev;
     ev.type = EVENT_CAMERA_TRIGGER;
-    ev.stringData = strdup(text); // Heap allocate so it survives the queue jump
+    ev.stringData = strdup(text); 
+    xQueueSend(eventQueue, &ev, portMAX_DELAY);
+}
+
+// NEW: Dispatches a signal to Core 1 to check the telemetry booleans
+void dispatchTelemetryUpdate() {
+    SystemEvent ev;
+    ev.type = EVENT_TELEMETRY_UPDATE;
+    ev.stringData = nullptr;
     xQueueSend(eventQueue, &ev, portMAX_DELAY);
 }
 
@@ -89,7 +92,6 @@ int microphone_audio_signal_get_data(size_t offset, size_t length, float *out_pt
 
 WiFiManager wifiManager;
 WiFiServer server(80);
-bool wifiConnected = false;
 int wifiRetryCount = 0;
 const int WIFI_RETRY_LIMIT = 5;
 const char *WIFI_SSID = "NeuraLearn";
@@ -100,10 +102,11 @@ void setupWiFi() {
     wifiManager.setConfigPortalTimeout(1000000000);
     wifiManager.setBreakAfterConfig(false);
 
-    while (!wifiConnected) {
+    while (!state.isConnectedToWifi) {
         if (!wifiManager.autoConnect(WIFI_SSID, WIFI_PASSWORD)) {
             if (wifiRetryCount < WIFI_RETRY_LIMIT) {
-                wifiConnected = false;
+                state.isConnectedToWifi = false;
+                dispatchTelemetryUpdate();
                 wifiRetryCount +=1;
                 delay(2000);
             } else {
@@ -111,10 +114,17 @@ void setupWiFi() {
                 ESP.restart();
             }
         } else {
-            wifiConnected = true;
+            // FIRE ALARM: WiFi Connected! Tell the UI.
+            state.isConnectedToWifi = true;
+            dispatchTelemetryUpdate(); 
         }
     }
     Serial.println("Info: [NETWORK] WiFi connected!");
+    
+    // --- NTP TIME SYNCHRONIZATION ---
+    Serial.println("Info: [NETWORK] Syncing NTP (Singapore Time)...");
+    // 28800 seconds = GMT+8 (Singapore time offset)
+    configTime(25200, 0, "pool.ntp.org", "time.nist.gov");
 }
 
 class AudioFileSourceInsecureHTTPS : public AudioFileSource {
@@ -189,7 +199,9 @@ public:
 void playAudioResponse(const char* wav_url) {
     Serial.println("\nInfo: [SYSTEM] -> 🔊 Playing Audio Response...");
     
-    // Notify user the AI is actively talking
+    // FIRE ALARM: We are speaking. Toggle Volume icon.
+    state.isPlayingAudio = true;
+    dispatchTelemetryUpdate();
     dispatchMoodUpdate(SPEAKING);
 
     out = new AudioOutputI2S(1, AudioOutputI2S::EXTERNAL_I2S); 
@@ -210,14 +222,14 @@ void playAudioResponse(const char* wav_url) {
     delete file;
     delete out;
 
-    // Audio finished, return to idle state
+    // FIRE ALARM: Done speaking. Mute Volume icon.
+    state.isPlayingAudio = false;
+    dispatchTelemetryUpdate();
     dispatchMoodUpdate(WAITING);
 }
 
 void takePictureAndSend() {
     Serial.println("\nInfo: [CAMERA] Waking up hardware via Just-In-Time Allocation...");
-    
-    //  Alert user camera sequence has begun
     dispatchMoodUpdate(POMODORO_FOCUS); 
 
     camera_config_t config;
@@ -252,7 +264,6 @@ void takePictureAndSend() {
     
     vTaskDelay(pdMS_TO_TICKS(500));
 
-    // Render the physical countdown over the face
     for (int i = 3; i > 0; i--) {
         char buf[16];
         snprintf(buf, sizeof(buf), "%d...", i);
@@ -273,7 +284,9 @@ void takePictureAndSend() {
         WiFiClientSecure client;
         client.setInsecure();
 
-        // Tell user we are transmitting massive image and waiting for AI
+        // FIRE ALARM: Attempting server connection
+        state.isConnectedToServer = true;
+        dispatchTelemetryUpdate();
         dispatchMoodUpdate(THINKING);
 
         http.setTimeout(30000); 
@@ -286,6 +299,9 @@ void takePictureAndSend() {
         int httpResponseCode = http.POST(fb->buf, fb->len);
         if (httpResponseCode == 200 || httpResponseCode == 201) {
             jsonResponse = http.getString();
+        } else {
+            state.isConnectedToServer = false;
+            dispatchTelemetryUpdate();
         }
         http.end();
     }
@@ -304,17 +320,33 @@ void takePictureAndSend() {
 void recordAndSendAudioToAPI() {
     Serial.println("\nInfo: [SYSTEM] -> Wake word triggered! Reactive stream started...");
     
-    // WAKE_WORD_DETECTED will automatically set mood to LISTENING in Core 1
+    // FIRE ALARM: Mic is active!
+    state.isListening = true;
+    dispatchTelemetryUpdate();
+
     SystemEvent wakeEv;
     wakeEv.type = WAKE_WORD_DETECTED;
     xQueueSend(eventQueue, &wakeEv, portMAX_DELAY);
 
-    if (WiFi.status() != WL_CONNECTED) return;
+    if (WiFi.status() != WL_CONNECTED) {
+        state.isListening = false;
+        dispatchTelemetryUpdate();
+        return;
+    }
 
     WiFiClientSecure client;
     client.setInsecure(); 
 
-    if (!client.connect(API_HOST, 443)) return;
+    if (!client.connect(API_HOST, 443)) {
+        state.isConnectedToServer = false;
+        state.isListening = false;
+        dispatchTelemetryUpdate();
+        return;
+    }
+
+    // FIRE ALARM: We successfully opened a TCP socket to Vercel
+    state.isConnectedToServer = true;
+    dispatchTelemetryUpdate();
 
     client.print(String("POST ") + AUDIO_API_PATH + " HTTP/1.1\r\n");
     client.print(String("Host: ") + API_HOST + "\r\n");
@@ -364,9 +396,11 @@ void recordAndSendAudioToAPI() {
     }
 
     client.print("0\r\n\r\n");
-    Serial.println("Info: [SYSTEM] -> ⏹️ Stream closed. Waiting for AI response...");
+    Serial.println("Info: [SYSTEM] -> Stream closed. Waiting for AI response...");
 
-    // User stopped talking. Waiting on Gemini.
+    // FIRE ALARM: Stopped listening to user
+    state.isListening = false;
+    dispatchTelemetryUpdate();
     dispatchMoodUpdate(THINKING);
 
     String jsonResponse = "";
@@ -394,13 +428,15 @@ void recordAndSendAudioToAPI() {
             if (resDoc.containsKey("action") && resDoc["action"] == "TAKE_PICTURE") shouldTakePicture = true;
             if (resDoc.containsKey("audio_url")) playAudioResponse(resDoc["audio_url"]);
         }
+    } else {
+        // AI Failed to respond
+        state.isConnectedToServer = false;
+        dispatchTelemetryUpdate();
     }
 
     if (shouldTakePicture) takePictureAndSend();
 
     i2s_zero_dma_buffer(I2S_PORT_MIC);
-    
-    // Reset to neutral after full cycle completes
     dispatchMoodUpdate(WAITING);
 }
 
@@ -408,7 +444,7 @@ void networkTask(void *pvParameters) {
     Serial.println("Info: Logic Task started on Core 0");
 
     setupWiFi();
-    dispatchMoodUpdate(WAITING); // System initialized, ready for commands
+    dispatchMoodUpdate(WAITING); 
 
     i2s_config_t i2s_config = {
         .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
