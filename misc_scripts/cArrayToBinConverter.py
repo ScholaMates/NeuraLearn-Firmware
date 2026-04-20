@@ -1,8 +1,8 @@
 import re
 import struct
 
-INPUT_TEXT_FILE = "input.txt" # Paste your C-array here
-OUTPUT_BIN_FILE = "bg.bin"
+INPUT_TEXT_FILE = "" # Set the path to your input text file containing the C-array, e.g. "input_array.txt"
+OUTPUT_BIN_FILE = "" # Set the output path for the generated binary file, e.g. "output_image.bin"
 
 def convert_c_array_to_bin():
     """ try:

@@ -4,13 +4,12 @@ import time
 import logging
 from PIL import Image, ImageFont, ImageDraw
 
-# --- Configuration ---
-FONT_FILE = "/home/Fabio/main/Downloads/unifont-17.0.04.otf"
+FONT_FILE = "" # Set the path to your .ttf font file, e.g. "assets/fonts/YourFont.ttf"
 FONT_SIZE = 36
-OUTPUT_FILE = "src/faces_data.h"
+OUTPUT_FILE = "" # Set the output path for the generated header file, e.g. "src/assets/faces.h"
 
 TEXT_COLOR = (203, 166, 247) 
-BG_COLOR = (0, 0, 0) # TFT_BLACK
+BG_COLOR = (0, 0, 0)
 
 FACES = {
     "SLEEPING": "(ᴗ˳ᴗ)ᶻzZ",
@@ -34,7 +33,6 @@ FACES = {
     "FALLBACK": "(☓‿‿☓)"
 }
 
-# --- Strict Logger ---
 class StrictFormatter(logging.Formatter):
     FORMATS = {
         logging.DEBUG: "Debug: %(message)s",
@@ -77,7 +75,7 @@ def main():
         logger.error(f"Font loading failed: {e}")
         return
 
-    # 1. Calculate the Universal Bounding Box (Crucial to prevent UI ghosting)
+    # Calculate the Universal Bounding Box (Crucial to prevent UI ghosting)
     logger.debug("Calculating maximum memory bounds for DMA alignment...")
     dummy_img = Image.new("RGB", (1, 1), BG_COLOR)
     draw = ImageDraw.Draw(dummy_img)
@@ -97,7 +95,7 @@ def main():
 
     logger.info(f"Universal Bounding Box locked at: {max_w}x{max_h} pixels.")
 
-    # 2. Render and Serialize
+    # Render and Serialize
     sprite_data = {}
     total_faces = len(FACES)
     
@@ -123,7 +121,7 @@ def main():
         print_progress_bar(i + 1, total_faces, prefix='Rasterizing:', suffix=f'({name})', length=40)
         time.sleep(0.02) # Fluid terminal animation
 
-    # 3. Compile the C++ Header File
+    # Compile the C++ Header File
     logger.debug(f"Compiling memory arrays to {OUTPUT_FILE}...")
     os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
     
