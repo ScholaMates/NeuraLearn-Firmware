@@ -5,20 +5,12 @@
 #include "faces_data.h" 
 #include "ui_renderer.h"
 #include "types.h"
+#include "config.h"
 
-// --- Display Configuration ---
-#define TFT_WIDTH 480
-#define TFT_HEIGHT 320
-#define BG_X 10
-#define BG_Y 22
-#define BG_WIDTH 460
-#define BG_HEIGHT 276
-#define EXPECTED_BG_SIZE (BG_WIDTH * BG_HEIGHT * 2) 
-
-#define TFT_MAUVE 0xCD3E 
-
+// Cache the last mood to prevent redundant redraws
 static DeviceState lastMood = (DeviceState)-1;
 
+// Utility to convert DeviceState enum to human-readable string
 const char* getStateName(DeviceState state) {
   switch (state) {
     case SLEEPING:       return "Sleeping";
@@ -49,7 +41,7 @@ void drawCurrentFaceAndState(TFT_eSPI& tft, GlobalState& state) {
     int face_x = (TFT_WIDTH / 2) - (FACE_WIDTH / 2);
     int face_y = (TFT_HEIGHT / 2) - (FACE_HEIGHT / 2);
 
-    // 1. Wipe the specific face block 
+    // Wipe the specific face block 
     tft.fillRect(0, face_y, TFT_WIDTH, FACE_HEIGHT, TFT_BLACK);
 
     switch (state.mood) {
@@ -76,9 +68,9 @@ void drawCurrentFaceAndState(TFT_eSPI& tft, GlobalState& state) {
 
     tft.setTextColor(TFT_MAUVE, TFT_BLACK); 
     
-    // 2. Hardware "Squeegee" Wipe
-    // Instead of setTextPadding, we physically blank the entire horizontal band where the text lives.
-    // This perfectly erases the dropping tails of 'p' or 'g' from previous strings.
+    // Hardware "Squeegee" Wipe
+    //> Instead of setTextPadding, we physically blank the entire horizontal band where the text lives.
+    //> This perfectly erases the dropping tails of 'p' or 'g' from previous strings.
     int text_y_center = (TFT_HEIGHT / 2) - (FACE_HEIGHT / 2) - 30;
     tft.fillRect(0, text_y_center - 20, TFT_WIDTH, 40, TFT_BLACK); 
     
@@ -88,15 +80,17 @@ void drawCurrentFaceAndState(TFT_eSPI& tft, GlobalState& state) {
     lastMood = state.mood;
 }
 
-// THE DYNAMIC TELEMETRY ENGINE
+// This function updates the status icons in the top right corner based on the current global state
 void updateTelemetryIcons(TFT_eSPI& tft, GlobalState& state) {
-    // Isolated Caches
-    static bool lastWifi = !state.isConnectedToWifi; // Force initial draw
+
+    static bool lastWifi = !state.isConnectedToWifi;
     static bool lastServer = !state.isConnectedToServer;
     static bool lastMic = !state.isListening;
     static bool lastAudio = !state.isPlayingAudio;
+    static int lastBatt = -1;
+    static int lastVolume = -1;
 
-    // 1. WiFi Logic (Anchored perfectly to X:377 per icons_data.h)
+    // WiFi UI Logic (Anchored perfectly to X:377)
     if (state.isConnectedToWifi != lastWifi) {
         if (state.isConnectedToWifi) {
             // "Stamp Eraser": Wipe the massive 43x44 disabled bounding box first!
@@ -107,9 +101,31 @@ void updateTelemetryIcons(TFT_eSPI& tft, GlobalState& state) {
         }
         lastWifi = state.isConnectedToWifi;
     }
-    tft.pushImage(409, 20, 24, 16, image_Battery_Charging_pixels);
     
-    // 2. Cellular/Server Logic (Anchored to X:349)
+    // Battery UI Logic (Anchored to X:409)
+    if (state.batteryLevel != lastBatt) {
+        // Wipe the old static battery bounding box (X:409, Y:20, W:24, H:16)
+        tft.fillRect(409, 20, 30, 16, TFT_BLACK); 
+        
+        // Draw physical battery chassis
+        tft.drawRect(409, 20, 24, 14, 0xFFFF);       // Main cylinder
+        tft.fillRect(433, 24, 3, 6, 0xFFFF);         // Positive terminal nub
+        
+        // Calculate internal liquid fill mapping (Width 0 to 20 pixels max)
+        int fillWidth = map(state.batteryLevel, 0, 100, 0, 20);
+        
+        uint16_t battColor = TFT_MAUVE; 
+        if (state.batteryLevel <= 20) battColor = TFT_RED;
+        else if (state.batteryLevel <= 40) battColor = TFT_ORANGE;
+        
+        // Render the fluid block
+        if (fillWidth > 0) {
+            tft.fillRect(411, 22, fillWidth, 10, battColor);
+        }
+        lastBatt = state.batteryLevel;
+    }
+
+   // Cellular/Server UI Logic (Anchored to X:349)
     if (state.isConnectedToServer != lastServer) {
         if (state.isConnectedToServer) {
             // Hide the cellular disabled icon when connected to server
@@ -120,7 +136,7 @@ void updateTelemetryIcons(TFT_eSPI& tft, GlobalState& state) {
         lastServer = state.isConnectedToServer;
     }
 
-    // 3. Microphone Logic (Anchored to X:225 / X:227)
+    // Microphone UI Logic (Anchored to X:225 / X:227)
     if (state.isListening != lastMic) {
         if (state.isListening) {
             // The enabled icon is 26x30, disabled is a massive 236x30 band! Wipe it!
@@ -132,19 +148,23 @@ void updateTelemetryIcons(TFT_eSPI& tft, GlobalState& state) {
         lastMic = state.isListening;
     }
 
-    // 4. Volume/Audio Logic (Anchored to X:114)
-    if (state.isPlayingAudio != lastAudio) {
+    // Volume/Audio UI Logic (Anchored to X:114)
+    if (state.isPlayingAudio != lastAudio || globalConfig.volume != lastVolume) {
         // Wipe 20x16 box (The max width of the loud volume icon)
         tft.fillRect(114, 21, 20, 16, TFT_BLACK); 
-        if (state.isPlayingAudio) {
-            tft.drawBitmap(114, 21, image_volume_normal_bits, 18, 16, 0xFFFF);
-        } else {
+        
+        if (globalConfig.volume <= 5 || !state.isPlayingAudio) {
+            // Muted or Volume knob turned all the way down
             tft.drawBitmap(114, 21, image_volume_muted_bits, 18, 16, 0xFFFF);
+        } else {
+            // Actively playing and volume is up
+            tft.drawBitmap(114, 21, image_volume_normal_bits, 18, 16, 0xFFFF);
         }
         lastAudio = state.isPlayingAudio;
+        lastVolume = globalConfig.volume;
     }
     
-    // --- 5. Real-Time Clock & Date Logic ---
+    // Clock & Date UI Logic 
     static int lastMinute = -1;
     
     time_t now;
@@ -179,7 +199,7 @@ void updateTelemetryIcons(TFT_eSPI& tft, GlobalState& state) {
         lastMinute = timeinfo.tm_min;
     }
 
-    // --- 6. Pomodoro Timer Logic ---
+    // Podomoro Timer UI Logic (Anchored to X:179, Y:235)
     static int lastPomoSec = -1;
     int currentPomoSec = 0;
     
@@ -214,6 +234,8 @@ void updateTelemetryIcons(TFT_eSPI& tft, GlobalState& state) {
     }
 }
 
+// This function draws the static background elements (non-changing UI components) from a binary file on LittleFS at the beginning of the program
+//> I have chosen to store the background in LittleFS since, it only needs to be drawn once at startup
 void drawBackground(TFT_eSPI& tft) {
     fs::File f = LittleFS.open("/bg.bin", "r");
     if (!f || f.size() == 0) {
@@ -238,6 +260,7 @@ void drawBackground(TFT_eSPI& tft) {
     }
 }
 
+// This function renders the static icons that don't change with state (Battery outline, Cellular outline, Static Text, etc.)
 void renderStaticIcons(TFT_eSPI& tft) {
     uint8_t oldDatum = tft.getTextDatum();
     tft.setTextDatum(TL_DATUM);
@@ -267,6 +290,7 @@ void renderStaticIcons(TFT_eSPI& tft) {
     tft.setTextDatum(oldDatum); // Restore the original Middle-Center anchor
 }
 
+// This function initializes the TFT display, sets rotation, loads fonts, and draws the static background and icons
 void tft_init(TFT_eSPI& tft, String FONT_FILENAME) { 
     tft.init();
     tft.fillScreen(TFT_BLACK);
@@ -281,6 +305,7 @@ void tft_init(TFT_eSPI& tft, String FONT_FILENAME) {
     if (!tft.fontLoaded) tft.setTextFont(4);
 }
 
+// The main UI Task that runs on Core 1, responsible for rendering the face, state text, and telemetry icons based on events received from logic_fn.cpp
 void uiTask(void *pvParameters) {
     TFT_eSPI tft = *(TFT_eSPI*)pvParameters;
     Serial.println("Info: [UI] UI Task Started on Core 1.");
@@ -305,10 +330,16 @@ void uiTask(void *pvParameters) {
 
                 case EVENT_CAMERA_TRIGGER:
                     if (msg.stringData != nullptr) {
-                        tft.setTextColor(TFT_CYAN, TFT_BLACK); 
-                        tft.setTextPadding(200); 
-                        tft.drawString(msg.stringData, TFT_WIDTH / 2, TFT_HEIGHT / 2);
-                        lastMood = (DeviceState)-1; 
+
+                        // Moved from dead center to Top-Center (Y=70) in Yellow.
+                        tft.setTextColor(TFT_YELLOW, TFT_BLACK); 
+                        tft.setTextPadding(150); 
+                        tft.drawString(msg.stringData, TFT_WIDTH / 2, 70);
+                        
+                        // Released the padding lock
+                        tft.setTextPadding(0);
+                        
+                        // Free the string data after use to prevent memory leaks lmao
                         free(msg.stringData); 
                     }
                     break;
@@ -323,8 +354,7 @@ void uiTask(void *pvParameters) {
             }
         }
         
-        // --- THE HARDWARE HEARTBEAT ---
-        // This runs unconditionally every time the queue times out (1Hz),
+        // This runs unconditionally every time the queue times out (1Hz/ technically every 1000ms),
         // allowing the clock and Pomodoro timer to physically tick on the screen!
         updateTelemetryIcons(tft, state);
     }

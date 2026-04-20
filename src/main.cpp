@@ -15,7 +15,7 @@ TFT_eSPI tft = TFT_eSPI();
 QueueHandle_t eventQueue;
 
 AppConfig globalConfig = {
-    .volume = 80,
+    .volume = 100,
     .defaultState = SLEEPING,
     .isMuted = false,
 };
@@ -43,32 +43,35 @@ void camera_init() {
     config.pin_sccb_scl = SIOC_GPIO_NUM;
     config.pin_pwdn = PWDN_GPIO_NUM;
     config.pin_reset = RESET_GPIO_NUM;
+    
+    // THE VIP SETTINGS (Copied directly from your successful isolated test)
     config.xclk_freq_hz = 10000000;
-    
-    config.pixel_format = PIXFORMAT_RGB565;
-    config.frame_size = FRAMESIZE_CIF;
-    
-    config.jpeg_quality = 10;
-    config.fb_count = 5;
+    config.pixel_format = PIXFORMAT_JPEG;
+    config.frame_size = FRAMESIZE_VGA;
+    config.jpeg_quality = 12;
+    config.fb_count = 1;
     config.fb_location = CAMERA_FB_IN_PSRAM;
     config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
 
-
-    Serial.println("Initializing camera...");
+    Serial.println("Info: [SYSTEM] Initializing camera to claim PSRAM VIP space...");
     esp_err_t err = esp_camera_init(&config);
     if (err != ESP_OK) {
-        Serial.printf("FATAL: Camera init failed with error 0x%x\n", err);
-        tft.setTextColor(TFT_RED);
-        tft.setTextDatum(MC_DATUM);
-        tft.drawString("Camera Init Failed", 160, 120);
+        Serial.printf("Error: [SYSTEM] FATAL: Camera init failed with error 0x%x\n", err);
+        Serial.println("Error: [SYSTEM] System halting to protect data integrity.");
         while(1);
     }
-    Serial.println("SUCCESS: Camera initialized!");
+    Serial.println("Info: [SYSTEM] SUCCESS: Camera initialized and memory claimed!");
 }
 
 void setup() {
-    dataMutex = xSemaphoreCreateMutex();
     Serial.begin(115200);
+    delay(500); // Brief hardware stabilization delay
+    Serial.println("\nInfo: [SYSTEM] Booting NeuraLearn OS...");
+
+    // 1. HARDWARE ORCHESTRATION: Camera must boot FIRST to claim contiguous PSRAM
+    camera_init();
+
+    dataMutex = xSemaphoreCreateMutex();
 
     DeviceState currentState = globalConfig.defaultState;
     state.batteryLevel = 80;
@@ -81,22 +84,19 @@ void setup() {
     state.pomodoroEndTime = 0;
     state.wifiStrength = 0; 
 
-
     eventQueue = xQueueCreate(10, sizeof(SystemEvent)); 
 
-    Serial.println("Starting LittleFS...");
+    Serial.println("Info: [FS] Starting LittleFS...");
     if (!LittleFS.begin()) {
-    Serial.println("FATAL: LittleFS Mount Failed.");
-    return;
+        Serial.println("Error: [FS] FATAL: LittleFS Mount Failed.");
+        return;
     }
-    Serial.println("LittleFS Mounted Successfully.");
-
-    // camera_init();
+    Serial.println("Info: [FS] LittleFS Mounted Successfully.");
 
     tft_init(tft, FONT_FILENAME);
-
     drawBackground(tft);
-    // Create Task on Core 0
+
+    // Create Task on Core 0 (Network & AI Processing)
     xTaskCreatePinnedToCore(
         networkTask,   // Function
         "Network",     // Name
@@ -107,7 +107,7 @@ void setup() {
         0              // CORE 0 ID
     );
 
-    // Create Task on Core 1
+    // Create Task on Core 1 (UI Rendering)
     xTaskCreatePinnedToCore(
         uiTask,        // Function
         "UI",          // Name
@@ -117,7 +117,19 @@ void setup() {
         NULL,          // Handle
         1              // CORE 1 ID
     );
-}
-void loop() {
 
+    // Create Lightweight Hardware Polling Task (Core 1)
+    xTaskCreatePinnedToCore(
+        hardwareTask,  // Function
+        "Hardware",    // Name
+        2048,          // Stack size
+        NULL,          // Params
+        3,             // Priority (Highest - Needs instant response)
+        NULL,          // Handle
+        1              // CORE 1 ID
+    );
+}
+
+void loop() {
+    // Left empty. FreeRTOS tasks handle everything.
 }

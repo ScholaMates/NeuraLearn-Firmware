@@ -1,5 +1,6 @@
 #pragma once
 
+// -- Camera Pins for the Freenove ESP32 S-3 WROOM
 #define PWDN_GPIO_NUM     -1
 #define RESET_GPIO_NUM    -1
 #define XCLK_GPIO_NUM     15
@@ -17,34 +18,37 @@
 #define HREF_GPIO_NUM     7
 #define PCLK_GPIO_NUM     13
 
-#define BATTERY_PIN       1  // Connected to Voltage Divider
-#define VOLUME_POT_PIN    2  // Connected to Potentiometer Wiper
-
-// --- I2S Audio: Speaker (MAX98357A) ---
+// -- I2S Audio: Speaker (MAX98357A)
 #define I2S_SPK_BCLK      41
 #define I2S_SPK_LRC       42  // Word Select
 #define I2S_SPK_DIN       40  // Data In
 
-// --- I2S Audio: Microphone (INMP441) ---
+// -- I2S Audio: Microphone (INMP441)
 #define I2S_MIC_SCK       39  // Bit Clock
 #define I2S_MIC_WS        38  // Word Select
 #define I2S_MIC_SD        47  // Serial Data
+#define I2S_PORT_MIC I2S_NUM_0
 
-// --- SPI Display (ILI9341) ---
-/*
-
-# define ILI9488_DRIVER     // WARNING: Do not connect ILI9488 display SDO to MISO if other devices share the SPI bus (TFT SDO does NOT tristate when CS is high)
-- Use 9488 FUCK ITS BEEN A WHOLE FUCKING GHOUR ABSHJFJHIOELGVJEIQLO:
-- Anyways, use hspi ports
-
-#define TFT_MOSI          48
-#define TFT_SCLK          45
-#define TFT_CS            14  // Chip Select
-#define TFT_DC            21  // Data/Command
-#define TFT_RST           46  // Reset
-#define TFT_BL            3   // Backlight (PWM capable)
-*/
-
-// --- User Inputs ---
+// -- User Inputs
 #define BUTTON_1          0   // Built-in Boot Button (Use as input)
-#define BUTTON_2          43  // Extra button (Optional)
+#define VOLUME_POT_PIN    2  // Connected to Potentiometer Wiper
+
+// -- Battery voltage monitoring pin
+#define BATTERY_PIN       1  // Connected to Voltage Divider
+
+// -- SPI Display (ILI9488)
+//* Edit the file in .pio/libdeps/{Your model}/TFT_eSPI/User_Setup.h
+//* Mine is in .pio/libdeps/freenove_esp32_s3_wroom/TFT_eSPI/User_Setup.h
+//? Why the fuck isnt this shit automatic, cuz its annoying
+/*
+    # define ILI9488_DRIVER     // WARNING: Do not connect ILI9488 display SDO to MISO if other devices share the SPI bus (TFT SDO does NOT tristate when CS is high)
+    ! A Warning from me, use 9488, FUCK ITS BEEN A WHOLE FUCKING GHOUR ABSHJFJHIOELGVJEIQLO:
+    * Anyways, use HSPI ports also
+
+    #define TFT_MOSI          48
+    #define TFT_SCLK          45
+    #define TFT_CS            14  // Chip Select
+    #define TFT_DC            21  // Data/Command
+    #define TFT_RST           46  // Reset
+    #define TFT_BL            3   // Backlight (PWM capable)
+*/

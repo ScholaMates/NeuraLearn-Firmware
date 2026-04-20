@@ -1,6 +1,6 @@
 #include <Arduino.h>
 #include "esp_camera.h"
-#include "camera_pins.h"
+#include "pins.h"
 #include "esp_log.h"
 
 void setup() {

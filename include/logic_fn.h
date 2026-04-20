@@ -8,3 +8,4 @@ extern SemaphoreHandle_t dataMutex;
 extern GlobalState state;
 
 void networkTask(void *pvParameters);
+void hardwareTask(void *pvParameters);
