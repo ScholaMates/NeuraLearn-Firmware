@@ -1,7 +1,6 @@
 #pragma once
 #include <stdint.h>
 
-// Auto-Generated RGB565 Kaomoji Sprites (Catppuccin Mocha Mauve)
 // Memory Layout: 322x54 pixels
 #define FACE_WIDTH 322
 #define FACE_HEIGHT 54

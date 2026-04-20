@@ -270,7 +270,7 @@ public:
         }
         return true;
     }
-    
+
     virtual bool close() override
     {
         http.end();
@@ -402,7 +402,7 @@ void takePictureAndSend()
     // Return the buffer back to the camera driver pool
     esp_camera_fb_return(fb);
 
-    // Handle the enpoint response, if it contains an audio URL, trigger the audio playback function to play the response through the speaker 
+    // Handle the enpoint response, if it contains an audio URL, trigger the audio playback function to play the response through the speaker
     if (jsonResponse.length() > 0)
     {
         JsonDocument resDoc;
@@ -487,7 +487,7 @@ void recordAndSendAudioToAPI()
     while (millis() - start_time < MAX_RECORD_TIME_MS)
     {
         //> The portMAX_DELAY means the task will wait indefinitely until data is avaliable
-        i2s_read(I2S_PORT_MIC, temp_i2s_chunk, chunk_size * sizeof(int32_t), &bytes_read, portMAX_DELAY); 
+        i2s_read(I2S_PORT_MIC, temp_i2s_chunk, chunk_size * sizeof(int32_t), &bytes_read, portMAX_DELAY);
 
         size_t samples_read = bytes_read / sizeof(int32_t);
         long sum_amplitude = 0;
@@ -753,7 +753,6 @@ void hardwareTask(void *pvParameters)
 
         // Apply an exponential moving average filter to the raw volume reading
         // to stabilize it and prevent rapid fluctuations in the volume level
-        // due to noise or small adjustments of the potentiometer
         /*>
             By the way, EMA(Exponential Moving Average) is a filtering technique
             that gives more weight to recent data points, making it more
@@ -761,7 +760,7 @@ void hardwareTask(void *pvParameters)
             value (0.2 in this case) determines how much weight is given to the
             new data versus the previous EMA value. A higher alpha makes it more
             responsive, while a lower alpha makes it smoother.
-            
+
             The formula for EMA is:
             EMA_current = (alpha * New_Data) + ((1 - alpha) * EMA_previous
         */
