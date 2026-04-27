@@ -30,11 +30,11 @@
 #define I2S_PORT_MIC I2S_NUM_0
 
 // -- User Inputs
-#define BUTTON_1          0   // Built-in Boot Button (Use as input)
+#define BUTTON_1          1   // Built-in Boot Button (Use as input)
 #define VOLUME_POT_PIN    2  // Connected to Potentiometer Wiper
 
 // -- Battery voltage monitoring pin
-#define BATTERY_PIN       1  // Connected to Voltage Divider
+// #define BATTERY_PIN         // Connected to Voltage Divider
 
 // -- SPI Display (ILI9488)
 //* Edit the file in .pio/libdeps/{Your model}/TFT_eSPI/User_Setup.h

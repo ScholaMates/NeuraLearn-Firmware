@@ -21,4 +21,5 @@
 // Audio Recording Config
 #define MAX_RECORD_TIME_MS 15000
 #define SILENCE_TIMEOUT_MS 1500
-#define SILENCE_THRESHOLD 150
+#define SILENCE_THRESHOLD 300 // Originally 200, but I had to increase it cuz the mic is picking up too much ambient noise, and we dont want it to cut off too early while the user is speaking
+

@@ -10,6 +10,8 @@
 #include "esp_camera.h"
 #include "pins.h"
 #include "config.h"
+#include "driver/gpio.h"
+#include "driver/rtc_io.h"
 
 // Audio Libraries
 #include "AudioFileSource.h"
@@ -52,7 +54,7 @@ void dispatchMoodUpdate(DeviceState newMood)
 }
 
 // This function sends an event to the UI to trigger a camera countdown toast(or just floating notifications)
-void dispatchCameraCountdown(const char *text)
+void dispatchNotification(const char *text)
 {
     SystemEvent ev;
     ev.type = EVENT_CAMERA_TRIGGER;
@@ -116,7 +118,7 @@ void setupWiFi()
 // Custom AudioFileSource class to handle streaming WAV audio from HTTPS endpoints without blocking the main thread
 /*>
     Since the standard AudioFileSourceHTTPStream doesn't support HTTPS or has
-    blocking calls that can cause audio stuttering, this custom class uses
+    blocking calls that can cuz of audio stuttering, this custom class uses
     WiFiClientSecure to stream audio data securely and efficiently from the API
     endpoint. It implements non-blocking reads and a simple seek mechanism to
     allow for smooth audio playback.
@@ -324,6 +326,7 @@ void playAudioResponse(const char *wav_url)
                 {
                     out->SetGain((float)current_vol / 100.0f);
                     last_applied_vol = current_vol;
+                    Serial.printf("Info: [AUDIO] Volume changed to %d%%, updated audio output gain.\n", current_vol);
                 }
             }
             vTaskDelay(pdMS_TO_TICKS(2));
@@ -349,10 +352,10 @@ void takePictureAndSend()
     {
         char buf[16];
         snprintf(buf, sizeof(buf), "%d...", i);
-        dispatchCameraCountdown(buf);
+        dispatchNotification(buf);
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
-    dispatchCameraCountdown("SNAP!");
+    dispatchNotification("SNAP!");
 
     // Grab frame from camera
     camera_fb_t *fb = esp_camera_fb_get();
@@ -637,6 +640,23 @@ void networkTask(void *pvParameters)
             new_data_start[i] = (int16_t)(i2s_read_buff[i] >> 14);
         }
 
+        // Calculate the average amplitude of the audio samples in the inference
+        // buffer to use as a simple measure of volume, which can be used to
+        // filter out low-volume noise and prevent false triggers of the wake
+        // word detection
+        long sum_amplitude = 0;
+
+        for (int i = 0; i < samples_read; i++)
+        {
+            new_data_start[i] = (int16_t)(i2s_read_buff[i] >> 14);
+        }
+
+        for (int i = 0; i < EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE; i++) 
+        {
+            sum_amplitude += abs(inference_buffer[i]);
+        }
+        int avg_buffer_volume = sum_amplitude / EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE;
+
         // Set up the signal structure for the wake word detection model, providing a pointer to the inference buffer and the function to retrieve audio data for processing
         signal_t signal;
         signal.total_length = EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE;
@@ -667,8 +687,9 @@ void networkTask(void *pvParameters)
                 strcmp(result.classification[ix].label, "hey_buddy") == 0)
             {
 
-                if (result.classification[ix].value > CONFIDENCE_THRESHOLD)
+                if (result.classification[ix].value > CONFIDENCE_THRESHOLD && avg_buffer_volume > SILENCE_THRESHOLD)
                 {
+                    Serial.printf("Debug: [INFERENCE] Detected '%s' with confidence %.2f and average volume %d\n", result.classification[ix].label, result.classification[ix].value, avg_buffer_volume);
                     unsigned long now = millis();
                     if (now - last_trigger_time > COOLDOWN_MS)
                     {
@@ -693,43 +714,56 @@ void hardwareTask(void *pvParameters)
 {
     Serial.println("Info: [Hardware] Hardware Task started on Core 1");
 
-    // ADC Tuning for 3.3V range
+    pinMode(BUTTON_1, INPUT_PULLDOWN);
+
+    // Set the ADC resolution and attenuation for reading the volume
+    // potentiometer, allowing for accurate volume level detection based on the
+    // potentiometer's position
     analogReadResolution(12);
     analogSetAttenuation(ADC_11db);
 
-    // Initialize the exponential moving average variables for battery and
-    // volume readings to stabilize the initial readings before the looping begins
-    float ema_batt = analogRead(BATTERY_PIN);
-    float ema_vol = analogRead(VOLUME_POT_PIN);
+    // Wait for WiFi connection before proceeding with any operations that
+    // require network access, ensuring that the system doesn't attempt to
+    // perform network operations before it's ready, which could lead to errors
+    // or unintended behavior
+    while (!state.isConnectedToWifi) 
+    {
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+    
+    unsigned long network_connect_time = millis();
+    vTaskDelay(pdMS_TO_TICKS(2000)); 
 
-    // The main loop continuously reads the battery voltage and volume
-    // potentiometer values, applies an exponential moving average filter for
-    // stability, maps the raw ADC values to percentage levels, and updates the
-    // global state and UI when significant changes are detected, while also
-    // implementing a hardware protection mechanism to warn the user of critical
-    // battery levels before the power bank cuts off power
+    float ema_vol = analogRead(VOLUME_POT_PIN);
+    
+    unsigned long button_press_start = 0;
+    unsigned long button_last_high = 0;
+
+    bool shield_dropped_notified = false;
+    unsigned long last_busy_toast_time = 0;
+
+    //> By the way, the chronological shield functions as a safety mechanism to
+    //> prevent the hardware kill-switch from being activated immediately after
+    //> powering on the device, which could be caused by accidental button
+    //> presses or hardware issues during startup.
+    //> It works by creating a time window (8 seconds in this case) during which the kill-switch is disabled, allowing
+    //> the system to stabilize and ensuring that critical operations are not
+    //> interrupted by unintended shutdowns. The UI also provides feedback to
+    //> the user when the shield is active and when it drops, enhancing the
+    //> overall user experience and safety of the device.
+
+
     while (true)
     {
-        /**
-            A fully charged 18650 battery is 4.2V. Sliced in half by two 100k resistors = 2.1V.
-            2.1V on an ESP32 ADC (11dB attenuation) reads roughly 2700-2800.
-            A dead 18650 is ~3.2V. Sliced in half = 1.6V.
-            1.6V on the ADC reads roughly 2100.
-        */
+        //! For the actual steam presentation, we will use a real battery to
+        //! measure voltage levels.
+        int batt_pct = 100;
 
-        int raw_batt = analogRead(BATTERY_PIN);
-        ema_batt = (0.05 * raw_batt) + (0.95 * ema_batt);
-
-        // Map the smoothed battery voltage reading to a percentage value
-        // between 0 and 100, based on the expected voltage range of the
-        // battery, and constrain it to ensure it stays within valid bounds
-        int batt_pct = map((int)ema_batt, 2100, 2750, 0, 100);
-        batt_pct = constrain(batt_pct, 0, 100);
-
-        // If the battery percentage has changed significantly (by 2% or more)
-        // since the last update, update the global state and signal the UI to
-        // redraw the telemetry icons, while also checking for critical battery
-        // levels to trigger a mood update and warning message
+        // Since the battery level can be a critical factor in the device's
+        // operation, we read the battery voltage from the ADC and calculate the
+        // percentage, updating the global state and UI if there's a significant
+        // change, and also triggering a low battery mood update if the battery
+        // level drops below a critical threshold
         if (abs(batt_pct - state.batteryLevel) >= 2)
         {
             xSemaphoreTake(dataMutex, portMAX_DELAY);
@@ -737,7 +771,6 @@ void hardwareTask(void *pvParameters)
             xSemaphoreGive(dataMutex);
             dispatchTelemetryUpdate();
 
-            // Warn user before Power Bank IC abruptly cuts 5V power
             if (batt_pct <= 5 && state.mood != LOW_BATTERY)
             {
                 dispatchMoodUpdate(LOW_BATTERY);
@@ -766,9 +799,13 @@ void hardwareTask(void *pvParameters)
         */
         ema_vol = (0.2 * raw_vol) + (0.8 * ema_vol);
 
-        int vol_pct = map((int)ema_vol, 0, 4095, 0, 100);
+        // Map the EMA-filtered volume reading to a percentage value (0-100%)
+        int vol_pct = map((int)ema_vol, 0, 4095, 100, 0);
+
+        // Constrain the volume percentage to be within the valid range of 0 to 100
         vol_pct = constrain(vol_pct, 0, 100);
 
+        // If the volume percentage has changed by 3% or more since the last update, update the global state and UI to reflect the new volume level
         if (abs(vol_pct - globalConfig.volume) >= 3)
         {
             xSemaphoreTake(dataMutex, portMAX_DELAY);
@@ -777,7 +814,145 @@ void hardwareTask(void *pvParameters)
             dispatchTelemetryUpdate();
         }
 
-        // Yield to the UI renderer (20Hz Polling Rate/ 50ms delay)
+        // Check if the system is currently busy with any operations (listening,
+        // connected to server, or playing audio) or if the chronological shield
+        // is still up, and if so, prevent the hardware kill-switch from being
+        // activated to ensure that critical operations are not interrupted
+        bool isSystemBusy = state.isListening || state.isConnectedToServer || state.isPlayingAudio;
+        bool isShieldUp = (millis() - network_connect_time <= 8000);
+
+        // The exact millisecond the 8-second chronological shield expires, we push a UI update 
+        // to tell the human user that the hardware kill-switch is officially unlocked.
+        if (!isShieldUp && !shield_dropped_notified) {
+            dispatchNotification("System Ready!");
+            shield_dropped_notified = true;
+        }
+
+        // If the user presses the button while the system is not busy and the
+        // shield is down, we start the process for the hardware kill-switch,
+        // which requires a 5-second hold followed by a physical release to
+        // confirm the user's intent to power off the device, while also
+        // implementing safeguards to prevent accidental activation or hardware
+        // issues
+        if (!isShieldUp && !isSystemBusy) 
+        {
+            if (digitalRead(BUTTON_1) == HIGH) 
+            {
+                // Check if the button just went HIGH, if so, we set a
+                // chronological anchor to start measuring the hold time, and
+                // also refresh the last high time to implement the elastic
+                // tension mechanism for micro-tremor forgiveness
+                if (button_press_start == 0) {
+                    button_press_start = millis(); // Drop the chronological anchor
+                    Serial.println("Debug: [SYSTEM] Button just went HIGH. Setting the chronological anchor.");
+                }
+                button_last_high = millis(); // Refresh the elastic tension
+
+                // Check if the button has been held HIGH for 5 seconds to
+                // verify the user's intent to activate the hardware
+                // kill-switch, while providing feedback through the serial
+                // monitor
+                if (millis() - button_press_start >= 5000) 
+                {
+                    Serial.println("Info: [SYSTEM] 5-Second Active-High hold verified. Awaiting physical release...");
+                    
+                    dispatchMoodUpdate(SLEEPING);
+                    
+                    // The Wait-For-Release Trap (Now checking for HIGH)
+                    unsigned long trap_start = millis();
+                    bool valid_release = false;
+
+                    // We wait for the user to physically release the button
+                    // (drop back to LOW), while also checking if the pin is
+                    // stuck HIGH for more than 10 seconds to detect potential
+                    // hardware issues, and providing feedback through the
+                    // serial monitor
+                    while (digitalRead(BUTTON_1) == HIGH) 
+                    {
+                        vTaskDelay(pdMS_TO_TICKS(50)); 
+                        
+                        // Checks if the pin is stuck HIGH for more than 10 seconds
+                        /*
+                            > Since it's possible for their to be a hardware
+                            > shorts or other failure, this checks for it.
+                            > if so, it aborts the shutdown sequence to prevent
+                            > potential damage or unintended behavior
+                        */ 
+                        if (millis() - trap_start > 10000) {
+                            Serial.println("Error: [SYSTEM] Pin HIGH for >10s. Hardware short detected! Aborting.");
+                            break;
+                        }
+                    }
+
+                    // If it successfully dropped back to bedrock (LOW), it was a real release.
+                    if (digitalRead(BUTTON_1) == LOW) {
+                        valid_release = true;
+                    }
+
+                    // If the release was valid, we proceed with the hardware
+                    // kill-switch sequence, which involves enabling GPIO hold
+                    // to maintain the state of the button pin even after power
+                    // is cut, enabling deep sleep hold to keep the backlight
+                    // off, and configuring the ULP coprocessor to wake the
+                    // system only on a specific external signal (the button
+                    // being pressed again) to prevent accidental wake-ups and
+                    // ensure a clean shutdown
+                    if (valid_release) {
+                        Serial.println("Info: [SYSTEM] Button released cleanly. Executing hardware kill-switch.");
+                        vTaskDelay(pdMS_TO_TICKS(100)); 
+                        
+                        // Transfer the pin's state (including the INPUT_PULLDOWN) to the RTC backup power grid.
+                        // This prevents the bungee cord from snapping when the main CPU power is cut.
+                        gpio_hold_en((gpio_num_t)BUTTON_1);
+                        
+                        // Apply the exact same RTC hold to the backlight so it stays pitched black!
+                        gpio_deep_sleep_hold_en();
+                        
+                        // Arm the ULP night-watchman to wake the CPU only on a 3.3V spike (1)
+                        esp_sleep_enable_ext0_wakeup((gpio_num_t)BUTTON_1, 1);
+                        esp_deep_sleep_start();
+                    } else {
+                        button_press_start = 0;
+                        dispatchMoodUpdate(WAITING);
+                    }
+                }
+            } 
+            else 
+            {
+                // If the button is not currently HIGH, we check if it was
+                // previously HIGH and if it has been released for more than 250
+                // milliseconds to account for micro-tremors or accidental brief
+                // presses, and if so, we reset the chronological anchor to
+                // prevent unintended activation of the hardware kill-switch,
+                // while providing feedback through the serial monitor
+                if (millis() - button_last_high > 250) {
+                    if (button_press_start != 0) {
+                        Serial.println("Debug: [SYSTEM] Anchor vaporized (Button Released).");
+                    }
+                    button_press_start = 0; // Vaporize the anchor
+                }
+            }
+        }
+        else 
+        {
+            button_press_start = 0;
+            button_last_high = millis();
+
+            // If the user tries to press the button while the system is locked (shield up or busy),
+            // we bridge the silicon's state to the TFT screen to tell the human WHY it's rejecting the input.
+            if (digitalRead(BUTTON_1) == HIGH) {
+                // 3-second cooldown to prevent spamming the Core 1 UI Queue 20 times a second
+                if (millis() - last_busy_toast_time > 3000) {
+                    last_busy_toast_time = millis();
+                    if (isShieldUp) {
+                        dispatchNotification("Booting... Please Wait.");
+                    } else if (isSystemBusy) {
+                        dispatchNotification("System Busy!");
+                    }
+                }
+            }
+        }
+
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
