@@ -651,7 +651,7 @@ void networkTask(void *pvParameters)
             new_data_start[i] = (int16_t)(i2s_read_buff[i] >> 14);
         }
 
-        for (int i = 0; i < EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE; i++) 
+        for (int i = 0; i < EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE; i++)
         {
             sum_amplitude += abs(inference_buffer[i]);
         }
@@ -726,16 +726,16 @@ void hardwareTask(void *pvParameters)
     // require network access, ensuring that the system doesn't attempt to
     // perform network operations before it's ready, which could lead to errors
     // or unintended behavior
-    while (!state.isConnectedToWifi) 
+    while (!state.isConnectedToWifi)
     {
         vTaskDelay(pdMS_TO_TICKS(500));
     }
-    
+
     unsigned long network_connect_time = millis();
-    vTaskDelay(pdMS_TO_TICKS(2000)); 
+    vTaskDelay(pdMS_TO_TICKS(2000));
 
     float ema_vol = analogRead(VOLUME_POT_PIN);
-    
+
     unsigned long button_press_start = 0;
     unsigned long button_last_high = 0;
 
@@ -751,7 +751,6 @@ void hardwareTask(void *pvParameters)
     //> interrupted by unintended shutdowns. The UI also provides feedback to
     //> the user when the shield is active and when it drops, enhancing the
     //> overall user experience and safety of the device.
-
 
     while (true)
     {
@@ -821,9 +820,10 @@ void hardwareTask(void *pvParameters)
         bool isSystemBusy = state.isListening || state.isConnectedToServer || state.isPlayingAudio;
         bool isShieldUp = (millis() - network_connect_time <= 8000);
 
-        // The exact millisecond the 8-second chronological shield expires, we push a UI update 
+        // The exact millisecond the 8-second chronological shield expires, we push a UI update
         // to tell the human user that the hardware kill-switch is officially unlocked.
-        if (!isShieldUp && !shield_dropped_notified) {
+        if (!isShieldUp && !shield_dropped_notified)
+        {
             dispatchNotification("System Ready!");
             shield_dropped_notified = true;
         }
@@ -834,15 +834,16 @@ void hardwareTask(void *pvParameters)
         // confirm the user's intent to power off the device, while also
         // implementing safeguards to prevent accidental activation or hardware
         // issues
-        if (!isShieldUp && !isSystemBusy) 
+        if (!isShieldUp && !isSystemBusy)
         {
-            if (digitalRead(BUTTON_1) == HIGH) 
+            if (digitalRead(BUTTON_1) == HIGH)
             {
                 // Check if the button just went HIGH, if so, we set a
                 // chronological anchor to start measuring the hold time, and
                 // also refresh the last high time to implement the elastic
                 // tension mechanism for micro-tremor forgiveness
-                if (button_press_start == 0) {
+                if (button_press_start == 0)
+                {
                     button_press_start = millis(); // Drop the chronological anchor
                     Serial.println("Debug: [SYSTEM] Button just went HIGH. Setting the chronological anchor.");
                 }
@@ -852,12 +853,12 @@ void hardwareTask(void *pvParameters)
                 // verify the user's intent to activate the hardware
                 // kill-switch, while providing feedback through the serial
                 // monitor
-                if (millis() - button_press_start >= 5000) 
+                if (millis() - button_press_start >= 5000)
                 {
                     Serial.println("Info: [SYSTEM] 5-Second Active-High hold verified. Awaiting physical release...");
-                    
+
                     dispatchMoodUpdate(SLEEPING);
-                    
+
                     // The Wait-For-Release Trap (Now checking for HIGH)
                     unsigned long trap_start = millis();
                     bool valid_release = false;
@@ -867,25 +868,27 @@ void hardwareTask(void *pvParameters)
                     // stuck HIGH for more than 10 seconds to detect potential
                     // hardware issues, and providing feedback through the
                     // serial monitor
-                    while (digitalRead(BUTTON_1) == HIGH) 
+                    while (digitalRead(BUTTON_1) == HIGH)
                     {
-                        vTaskDelay(pdMS_TO_TICKS(50)); 
-                        
+                        vTaskDelay(pdMS_TO_TICKS(50));
+
                         // Checks if the pin is stuck HIGH for more than 10 seconds
                         /*
                             > Since it's possible for their to be a hardware
                             > shorts or other failure, this checks for it.
                             > if so, it aborts the shutdown sequence to prevent
                             > potential damage or unintended behavior
-                        */ 
-                        if (millis() - trap_start > 10000) {
+                        */
+                        if (millis() - trap_start > 10000)
+                        {
                             Serial.println("Error: [SYSTEM] Pin HIGH for >10s. Hardware short detected! Aborting.");
                             break;
                         }
                     }
 
                     // If it successfully dropped back to bedrock (LOW), it was a real release.
-                    if (digitalRead(BUTTON_1) == LOW) {
+                    if (digitalRead(BUTTON_1) == LOW)
+                    {
                         valid_release = true;
                     }
 
@@ -897,27 +900,30 @@ void hardwareTask(void *pvParameters)
                     // system only on a specific external signal (the button
                     // being pressed again) to prevent accidental wake-ups and
                     // ensure a clean shutdown
-                    if (valid_release) {
+                    if (valid_release)
+                    {
                         Serial.println("Info: [SYSTEM] Button released cleanly. Executing hardware kill-switch.");
-                        vTaskDelay(pdMS_TO_TICKS(100)); 
-                        
+                        vTaskDelay(pdMS_TO_TICKS(100));
+
                         // Transfer the pin's state (including the INPUT_PULLDOWN) to the RTC backup power grid.
                         // This prevents the bungee cord from snapping when the main CPU power is cut.
                         gpio_hold_en((gpio_num_t)BUTTON_1);
-                        
+
                         // Apply the exact same RTC hold to the backlight so it stays pitched black!
                         gpio_deep_sleep_hold_en();
-                        
+
                         // Arm the ULP night-watchman to wake the CPU only on a 3.3V spike (1)
                         esp_sleep_enable_ext0_wakeup((gpio_num_t)BUTTON_1, 1);
                         esp_deep_sleep_start();
-                    } else {
+                    }
+                    else
+                    {
                         button_press_start = 0;
                         dispatchMoodUpdate(WAITING);
                     }
                 }
-            } 
-            else 
+            }
+            else
             {
                 // If the button is not currently HIGH, we check if it was
                 // previously HIGH and if it has been released for more than 250
@@ -925,28 +931,35 @@ void hardwareTask(void *pvParameters)
                 // presses, and if so, we reset the chronological anchor to
                 // prevent unintended activation of the hardware kill-switch,
                 // while providing feedback through the serial monitor
-                if (millis() - button_last_high > 250) {
-                    if (button_press_start != 0) {
+                if (millis() - button_last_high > 250)
+                {
+                    if (button_press_start != 0)
+                    {
                         Serial.println("Debug: [SYSTEM] Anchor vaporized (Button Released).");
                     }
                     button_press_start = 0; // Vaporize the anchor
                 }
             }
         }
-        else 
+        else
         {
             button_press_start = 0;
             button_last_high = millis();
 
             // If the user tries to press the button while the system is locked (shield up or busy),
             // we bridge the silicon's state to the TFT screen to tell the human WHY it's rejecting the input.
-            if (digitalRead(BUTTON_1) == HIGH) {
+            if (digitalRead(BUTTON_1) == HIGH)
+            {
                 // 3-second cooldown to prevent spamming the Core 1 UI Queue 20 times a second
-                if (millis() - last_busy_toast_time > 3000) {
+                if (millis() - last_busy_toast_time > 3000)
+                {
                     last_busy_toast_time = millis();
-                    if (isShieldUp) {
+                    if (isShieldUp)
+                    {
                         dispatchNotification("Booting... Please Wait.");
-                    } else if (isSystemBusy) {
+                    }
+                    else if (isSystemBusy)
+                    {
                         dispatchNotification("System Busy!");
                     }
                 }
