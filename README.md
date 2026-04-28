@@ -28,8 +28,6 @@ This firmware enables the NeuraLearn device with a rich set of features designed
 
 - Dynamic Facial Expressions: A color TFT screen displays rich, animated faces to convey status (listening, thinking, speaking), making the interaction more engaging.
 
-- Integrated Pomodoro Timer: Actively coaches students on time management and focus skills.
-
 - Visual Problem Solving: Utilizes an onboard camera to interpret problems from physical documents and get AI-powered help.
 
 - Automated Note-Taking: Seamlessly integrates with applications like Notion, Obsidian, or Google Docs to automatically log conversations.
