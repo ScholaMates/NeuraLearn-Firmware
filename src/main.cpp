@@ -100,7 +100,6 @@ void setup()
     Serial.println("Info: [FS] LittleFS Mounted Successfully.");
 
     tft_init(tft, FONT_FILENAME);
-    drawBackground(tft);
 
     // Create Task on Core 0 (Networking & Logic)
     xTaskCreatePinnedToCore(
