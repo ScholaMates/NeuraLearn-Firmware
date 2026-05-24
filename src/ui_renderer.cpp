@@ -292,6 +292,17 @@ void tft_init(TFT_eSPI& tft, String FONT_FILENAME) {
     if (!tft.fontLoaded) tft.setTextFont(4);
 }
 
+void handleErrorTimeout(TFT_eSPI &tft, GlobalState &currentState) {
+    currentState.mood = SAD_ERROR;
+    drawCurrentFaceAndState(tft, currentState);
+    
+    vTaskDelay(pdMS_TO_TICKS(5000));
+    
+    currentState.mood = WAITING;
+    drawCurrentFaceAndState(tft, currentState);
+}
+
+
 void uiTask(void *pvParameters) {
     if (pvParameters == NULL) vTaskDelete(NULL);
 
@@ -337,6 +348,10 @@ void uiTask(void *pvParameters) {
                 case WAKE_WORD_DETECTED:
                     state.mood = LISTENING;
                     drawCurrentFaceAndState(tft, state);
+                    break;
+
+                case TRIGGER_ERROR_TIMEOUT:
+                    handleErrorTimeout(tft, state);
                     break;
                     
                 default:

@@ -73,15 +73,6 @@ void dispatchTelemetryUpdate()
     xQueueSend(eventQueue, &ev, portMAX_DELAY);
 }
 
-// This function takes the current mood from the global state and updates the face displayed on the UI accordingly, along with the text description of the mood
-void handleNetworkError(const char* errorMessage) {
-    Serial.printf("Error: [NETWORK] %s\n", errorMessage);
-    dispatchMoodUpdate(SAD_ERROR);
-    // Add a short delay to allow the user to see the error state before resetting
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    dispatchMoodUpdate(WAITING);
-}
-
 // This function retrieves audio signal data from the microphone buffer, converts it from int16 to float, and provides it to the inference engine for processing
 //> The inference engine(AI model) expects float data in the range of -1.0 to 1.0
 int microphone_audio_signal_get_data(size_t offset, size_t length, float *out_ptr)
@@ -126,27 +117,6 @@ void setupWiFi()
 }
 
 // Custom AudioFileSource class to handle streaming WAV audio from HTTPS endpoints without blocking the main thread
-/*>
-    Since the standard AudioFileSourceHTTPStream doesn't support HTTPS or has
-    blocking calls that can cuz of audio stuttering, this custom class uses
-    WiFiClientSecure to stream audio data securely and efficiently from the API
-    endpoint. It implements non-blocking reads and a simple seek mechanism to
-    allow for smooth audio playback.
-*/
-
-/*
-    > This works by maintaining an active HTTP connection to the audio stream
-    > and reading data in small chunks, while also allowing for seeking by
-    > discarding data until the desired position is reached. It also handles
-    > timeouts and connection issues gracefully to prevent the audio playback
-    > from stuttering or crashing the system.
-
-    ? Why not use the existing AudioFileSourceHTTPStream class?
-    > This class is specifically designed to work with the AudioGeneratorWAV
-    > class, which expects an AudioFileSource to read audio data from. By using
-    > this custom class, we can stream audio responses from the API securely
-    > over HTTPS without blocking the main thread or causing performance issues.
-*/
 class AudioFileSourceInsecureHTTPS : public AudioFileSource
 {
 protected:
@@ -157,53 +127,48 @@ protected:
     bool opened;
 
 public:
-    /// This constructor initializes the HTTP connection to the given URL and
-    /*>
-        Basically like an initializer for the audio stream. It sets up the
-        WiFiClientSecure to ignore certificate validation (since we're just
-        streaming from a known API endpoint), and then begins the HTTP request to
-    */
     AudioFileSourceInsecureHTTPS(const char *url)
     {
         client.setInsecure();
+        Serial.printf("Debug: [AUDIO_HTTP] Connecting to URL: %s\n", url);
         http.begin(client, url);
+        
+        // --- THE REDIRECT FIX ---
+        // Forces the ESP32 to aggressively chase Supabase CDN 301/308 redirects 
+        http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+        
         int httpCode = http.GET();
+        Serial.printf("Debug: [AUDIO_HTTP] HTTP GET Result Code: %d\n", httpCode);
+
         if (httpCode == HTTP_CODE_OK || httpCode == HTTP_CODE_MOVED_PERMANENTLY)
         {
             size = http.getSize();
+            Serial.printf("Debug: [AUDIO_HTTP] Stream Size: %d bytes\n", size);
             opened = true;
         }
         else
         {
+            Serial.printf("Error: [AUDIO_HTTP] Failed to open stream. HTTP Code: %d\n", httpCode);
             opened = false;
             size = 0;
         }
         pos = 0;
     }
 
-    // This destructor ensures that the HTTP connection is properly closed when the object is destroyed to free up resources
     virtual ~AudioFileSourceInsecureHTTPS() { http.end(); }
 
-    // This method reads audio data from the HTTP stream into the provided
-    // buffer, handling timeouts and connection issues to ensure smooth playback
     virtual uint32_t read(void *data, uint32_t len) override
     {
-        // If the connection isn't open, return 0 bytes read
         if (!opened) return 0;
 
-        // --- THE ZOMBIE SOCKET FIX ---
-        // If we physically received the entire payload, aggressively kill the connection.
-        // This prevents the robot from hanging on the "SPEAKING" face infinitely.
         if (size > 0 && pos >= size) {
             opened = false;
             return 0;
         }
 
-        // Get the underlying stream from the HTTP client
         WiFiClient *stream = http.getStreamPtr();
         if (!stream) return 0;
 
-        // Read data in a loop until we've read the requested length or the connection is closed
         uint32_t bytesread = 0;
         uint8_t *buf = (uint8_t *)data;
         unsigned long timeout = millis();
@@ -213,14 +178,11 @@ public:
             int available = stream->available();
             if (available > 0)
             {
-                // Maximize throughput by reading massive chunks instead of byte-by-byte
                 int toread = len - bytesread;
                 if (toread > available) toread = available;
                 
-                // Read data from the stream into the buffer
                 int r = stream->read(buf + bytesread, toread);
 
-                // If we read some data, update the bytesRead count and reset the timeout
                 if (r > 0)
                 {
                     bytesread += r;
@@ -230,48 +192,40 @@ public:
             }
             else
             {
-                // Check for EOF inside the wait loop
                 if (size > 0 && pos >= size) {
+                    Serial.println("Debug: [AUDIO_HTTP] Natural EOF reached inside read loop.");
                     opened = false;
                     break;
                 }
 
-                // If no data is available, check for a timeout to prevent stalling
                 if (millis() - timeout > 10000)
                 {
-                    opened = false; // KILL THE SOCKET SO IT DOES NOT LOOP FOREVER
+                    Serial.printf("Error: [AUDIO_HTTP] Socket TIMEOUT at pos %d/%d\n", pos, size);
+                    opened = false; 
                     break;
                 }
 
-                vTaskDelay(pdMS_TO_TICKS(1)); // 1ms delay for hyper-fast network polling
+                vTaskDelay(pdMS_TO_TICKS(1)); 
             }
         }
 
-        // Violent server closure detection
         if (!http.connected() && bytesread == 0) {
+            Serial.println("Error: [AUDIO_HTTP] Server violently closed connection (bytesread == 0).");
             opened = false; 
         }
 
         return bytesread;
     }
 
-    // This method provides a non-blocking way to read audio data, which can be used by the audio generator to fetch data without stalling the main thread
     virtual uint32_t readNonBlock(void *data, uint32_t len) override { return read(data, len); }
 
-    // This method implements a simple seek mechanism by discarding data from the stream until the desired position is reached, allowing for smooth seeking without blocking
     virtual bool seek(int32_t newPos, int dir) override
     {
-        // If the connection isn't open, we can't seek
         if (!opened) return false;
-
-        // Calculate the new position based on the direction (0 = absolute, 1 = relative to current position)
         if (dir == 1) newPos = pos + newPos;
-
-        // If the new position is before the current position, we can't seek backwards in a stream, so return false
         if (newPos < pos) return false;
 
         uint32_t bytesToSkip = newPos - pos;
-
         if (bytesToSkip == 0) return true;
 
         WiFiClient *stream = http.getStreamPtr();
@@ -309,16 +263,15 @@ public:
     virtual uint32_t getPos() override { return pos; }
 };
 
-// This function takes a WAV file URL, streams it using the custom
-// AudioFileSourceInsecureHTTPS class, and plays it through the I2S audio output
-// while allowing for dynamic volume adjustments based on the global configuration
 void playAudioResponse(const char *wav_url)
 {
     // CRITICAL UX SHIFT: Do NOT dispatch the SPEAKING face yet.
-    // The previous network function (takePicture or recordAudio) already set the face to THINKING.
     // We maintain the THINKING state to mask the audio downloading latency.
     state.isPlayingAudio = true;
     dispatchTelemetryUpdate();
+
+    // Serial.println("Debug: [AUDIO] Starting playAudioResponse pipeline...");
+    // Serial.printf("Debug: [MEMORY] Free Heap before Audio Setup: %d bytes\n", ESP.getFreeHeap());
 
     // Audio Output Setup
     out = new AudioOutputI2S(1, AudioOutputI2S::EXTERNAL_I2S);
@@ -328,8 +281,8 @@ void playAudioResponse(const char *wav_url)
 
     file = new AudioFileSourceInsecureHTTPS(wav_url);
     
-    // SAFETY CHECK: Verify the stream is actually alive
     if (!file->isOpen()) {
+        Serial.println("Error: [AUDIO] file->isOpen() returned false. Aborting playback.");
         state.isPlayingAudio = false;
         dispatchTelemetryUpdate();
         dispatchMoodUpdate(WAITING);
@@ -338,26 +291,23 @@ void playAudioResponse(const char *wav_url)
         return;
     }
 
-    // 128KB WAREHOUSE INJECTION (Asynchronous Stockpiling)
-    // Allocates exactly 131,072 bytes (4 seconds of raw PCM) directly into the PSRAM.
-    // The moment this is instantiated, an invisible FreeRTOS task begins violently 
-    // sucking data out of the Wi-Fi antenna to fill the RAM.
-    buff = new AudioFileSourceBuffer(file, 131072); 
+    // Allocates exactly 98,304 bytes (3.0 seconds of raw PCM) directly into the RAM.
+    // Serial.printf("Debug: [MEMORY] Free Heap before 96KB Buffer Allocation: %d bytes\n", ESP.getFreeHeap());
+    buff = new AudioFileSourceBuffer(file, 98304); 
+    // Serial.printf("Debug: [MEMORY] Free Heap AFTER 96KB Buffer Allocation: %d bytes\n", ESP.getFreeHeap());
     
     // PRE-FETCH LATENCY SHIELD
-    // We intentionally halt the main execution thread for 2.5 seconds. 
-    // Since the face is still "THINKING," the user assumes the AI is still generating.
-    // In reality, the AI is done, and the ESP32 is physically stockpiling the audio payload.
-    vTaskDelay(pdMS_TO_TICKS(2500));
+    // Give the Wi-Fi task time to stockpile audio before the decoder drains it.
+    vTaskDelay(pdMS_TO_TICKS(2200));
 
     wav = new AudioGeneratorWAV();
 
-    // Start streaming and playing the audio response, while monitoring the global volume for real-time adjustments
+    // Start streaming and playing the audio response
+    // Serial.println("Debug: [AUDIO] Calling wav->begin()...");
     if (wav->begin(buff, out))
     {
         // PERFECT SYNCHRONIZATION
-        // Now that the 128KB warehouse is primed and the WAV engine is engaging, 
-        // we forcefully snap the UI to the SPEAKING state exactly as the sound waves hit the room.
+        // Forcefully snap the UI to the SPEAKING state exactly as the sound waves hit the room.
         dispatchMoodUpdate(SPEAKING);
 
         uint8_t last_applied_vol = globalConfig.volume;
@@ -368,7 +318,7 @@ void playAudioResponse(const char *wav_url)
                 wav->stop();
                 if (out) out->stop();
             } else {
-                // If the volume has changed in the global configuration, update the audio output gain in real-time without interrupting playback
+                // Real-time volume scaling
                 uint8_t current_vol = globalConfig.volume;
                 if (current_vol != last_applied_vol) {
                     out->SetGain(((float)current_vol / 100.0f) * 4.0f);
@@ -377,13 +327,13 @@ void playAudioResponse(const char *wav_url)
             }
             vTaskDelay(pdMS_TO_TICKS(2));
         }
+        // Serial.println("Debug: [AUDIO] wav->isRunning() returned false. Playback loop ended.");
     } else {
+        // Serial.println("Error: [AUDIO] wav->begin() returned false. Corrupt header or dead socket.");
         if (out) out->stop(); 
     }
 
-    // MEMORY DEALLOCATION
-    // Deleting "out" triggers the destructor which gracefully uninstalls the I2S driver.
-    // This physically drops the pins to 0V, perfectly silencing the amplifier without an MMU panic.
+    // Serial.println("Debug: [AUDIO] Deallocating audio pipeline memory...");
     delete wav;
     delete buff;
     delete file;
@@ -394,12 +344,11 @@ void playAudioResponse(const char *wav_url)
     dispatchMoodUpdate(WAITING);
 }
 
-// This function captures an image from the camera, uploads it to the vision API endpoint, and handles the response to trigger audio playback if an audio URL is returned in the response
 void takePictureAndSend()
 {
     dispatchMoodUpdate(POMODORO_FOCUS); 
+    // Serial.println("Debug: [VISION] Starting takePictureAndSend pipeline...");
     
-    // UI Countdown
     for (int i = 3; i > 0; i--)
     {
         char buf[16];
@@ -409,18 +358,12 @@ void takePictureAndSend()
     }
     dispatchNotification("SNAP!");
 
-    // Grab frame from camera
     camera_fb_t *fb = esp_camera_fb_get();
     
-    // Clear the notification text area so "SNAP!" doesn't sit on the screen forever
     dispatchNotification(" "); 
 
-    if (!fb)
-    {
-        return;
-    }
+    if (!fb) return;
 
-    // Upload the JPEG buffer directly to the Vision endpoint
     String jsonResponse = "";
     if (WiFi.status() == WL_CONNECTED)
     {
@@ -436,53 +379,73 @@ void takePictureAndSend()
         http.begin(client, String("https://") + API_HOST + VISION_API_PATH);
 
         http.addHeader("Content-Type", "image/jpeg");
-        
-        // This is perfectly bridging with the new Route.ts patch
         http.addHeader("x-user-id", TEST_USER_ID);
         if (currentChatId.length() > 0)
             http.addHeader("x-chat-id", currentChatId);
 
+        // Upload the physical payload
         int httpResponseCode = http.POST(fb->buf, fb->len);
+        Serial.printf("Debug: [VISION] HTTP POST Response Code: %d\n", httpResponseCode);
+        
+        esp_camera_fb_return(fb);
+
         if (httpResponseCode == 200 || httpResponseCode == 201)
         {
             jsonResponse = http.getString();
+            // Serial.printf("Debug: [VISION] Received JSON Payload Length: %d bytes\n", jsonResponse.length());
         }
         else
         {
+            // Serial.printf("Error: [VISION] Bad HTTP Code. Server response: %s\n", http.getString().c_str());
             state.isConnectedToServer = false;
             dispatchTelemetryUpdate();
         }
         http.end();
-        
-        if (httpResponseCode <= 0) {
-            handleNetworkError("HTTP Request Failed/Timed Out");
-            return;
-        }
-
-        if (httpResponseCode != 200) {
-            handleNetworkError("Server returned non-200 status");
-            return;
-        }
+    }
+    else 
+    {
+        Serial.println("Error: [VISION] WiFi disconnected during camera snap.");
+        esp_camera_fb_return(fb);
     }
 
-    // Return the buffer back to the camera driver pool
-    esp_camera_fb_return(fb);
+    String audio_url_to_play = "";
 
-    // Handle the enpoint response, if it contains an audio URL, trigger the audio playback function to play the response through the speaker
     if (jsonResponse.length() > 0)
     {
-        // Allocated dynamically for vision payload safety
         JsonDocument resDoc; 
-        if (!deserializeJson(resDoc, jsonResponse) && resDoc.containsKey("audio_url"))
+        DeserializationError error = deserializeJson(resDoc, jsonResponse);
+        if (!error)
         {
-            playAudioResponse(resDoc["audio_url"]);
+            Serial.println("Debug: [VISION] JSON successfully parsed.");
+            if (resDoc.containsKey("chat_id"))
+                currentChatId = resDoc["chat_id"].as<String>();
+                
+            if (resDoc.containsKey("audio_url") && !resDoc["audio_url"].isNull() && resDoc["audio_url"].as<String>().length() > 0)
+            {
+                audio_url_to_play = resDoc["audio_url"].as<String>();
+                Serial.println("Debug: [VISION] audio_url successfully extracted.");
+            }
         }
+        else 
+        {
+            Serial.printf("Error: [SYSTEM] JSON Parsing failed: %s\n", error.c_str());
+        }
+    } 
+    
+    jsonResponse = "";
+
+    if (audio_url_to_play.length() > 0) {
+        Serial.println("Debug: [VISION] Handing off to playAudioResponse...");
+        // Give FreeRTOS 250ms to merge the fragmented empty memory blocks
+        vTaskDelay(pdMS_TO_TICKS(250)); 
+        playAudioResponse(audio_url_to_play.c_str());
+    } else {
+        SystemEvent errorMsg;
+        errorMsg.type = TRIGGER_ERROR_TIMEOUT;
+        xQueueSend(eventQueue, &errorMsg, 0);
     }
 }
 
-// This function is the main logic task that runs on Core 0, responsible for
-// handling the wake word detection, recording audio from the microphone,
-// streaming it to the API, and processing the response to trigger UI updates and audio playback
 void recordAndSendAudioToAPI()
 {
     state.isListening = true;
@@ -491,10 +454,8 @@ void recordAndSendAudioToAPI()
     SystemEvent wakeEv;
     wakeEv.type = WAKE_WORD_DETECTED;
 
-    // Send the wake word detected event to the UI to trigger any UI updates
     xQueueSend(eventQueue, &wakeEv, portMAX_DELAY);
 
-    // Check WiFi connection before attempting to stream audio, if not connected, update state and return early
     if (WiFi.status() != WL_CONNECTED)
     {
         state.isListening = false;
@@ -505,7 +466,6 @@ void recordAndSendAudioToAPI()
     WiFiClientSecure client;
     client.setInsecure();
 
-    // Attempt to connect to the API server, if connection fails, update state and return early to prevent further issues
     if (!client.connect(API_HOST, 443))
     {
         state.isConnectedToServer = false;
@@ -522,7 +482,6 @@ void recordAndSendAudioToAPI()
     client.print("Content-Type: application/octet-stream\r\n");
     client.print(String("x-user-id: ") + TEST_USER_ID + "\r\n");
 
-    // If there's an active chat session, include the chat ID in the headers to maintain context in the conversation with the AI
     if (currentChatId.length() > 0)
         client.print("x-chat-id: " + currentChatId + "\r\n");
 
@@ -532,7 +491,6 @@ void recordAndSendAudioToAPI()
     int32_t *temp_i2s_chunk = (int32_t *)malloc(chunk_size * sizeof(int32_t));
     int16_t *pcm_16_chunk = (int16_t *)malloc(chunk_size * sizeof(int16_t));
 
-    // If memory allocation for the audio buffers fails, clean up and return early to prevent crashes
     if (!temp_i2s_chunk || !pcm_16_chunk)
     {
         if (temp_i2s_chunk) free(temp_i2s_chunk);
@@ -546,7 +504,6 @@ void recordAndSendAudioToAPI()
     int max_silent_chunks = (SILENCE_TIMEOUT_MS * 16) / chunk_size;
     size_t bytes_read = 0;
 
-    // Read audio data from the microphone in chunks, convert it to 16-bit PCM, and stream it to the API using chunked transfer encoding
     while (millis() - start_time < MAX_RECORD_TIME_MS)
     {
         i2s_read(I2S_PORT_MIC, temp_i2s_chunk, chunk_size * sizeof(int32_t), &bytes_read, portMAX_DELAY);
@@ -554,7 +511,6 @@ void recordAndSendAudioToAPI()
         size_t samples_read = bytes_read / sizeof(int32_t);
         long sum_amplitude = 0;
 
-        // Convert the 32-bit I2S audio data to 16-bit PCM format
         for (size_t i = 0; i < samples_read; i++)
         {
             pcm_16_chunk[i] = (int16_t)(temp_i2s_chunk[i] >> 14);
@@ -585,7 +541,6 @@ void recordAndSendAudioToAPI()
     String jsonResponse = "";
     unsigned long timeout = millis();
 
-    // Read the response from the endpoint, looking for a JSON payload that contains the AI's response, and update the current chat ID if provided in the response for maintaining conversation context
     while (client.connected() && millis() - timeout < 20000)
     {
         if (client.available())
@@ -603,6 +558,7 @@ void recordAndSendAudioToAPI()
     free(pcm_16_chunk);
 
     bool shouldTakePicture = false;
+    String audio_url_to_play = "";
 
     if (jsonResponse.length() > 0)
     {
@@ -614,8 +570,19 @@ void recordAndSendAudioToAPI()
                 currentChatId = resDoc["chat_id"].as<String>();
             if (resDoc.containsKey("action") && resDoc["action"] == "TAKE_PICTURE")
                 shouldTakePicture = true;
-            if (resDoc.containsKey("audio_url"))
-                playAudioResponse(resDoc["audio_url"]);
+                
+            if (resDoc.containsKey("audio_url") && !resDoc["audio_url"].isNull() && resDoc["audio_url"].as<String>().length() > 0)
+            {
+                audio_url_to_play = resDoc["audio_url"].as<String>();
+            }
+            else if (!shouldTakePicture) 
+            {
+                Serial.println("Error: [SYSTEM] Vercel returned text, but 'audio_url' is missing. ElevenLabs TTS failed/timed out!");
+            }
+        }
+        else 
+        {
+            Serial.printf("Error: [SYSTEM] JSON Parsing failed: %s\n", error.c_str());
         }
     }
     else
@@ -623,23 +590,24 @@ void recordAndSendAudioToAPI()
         state.isConnectedToServer = false;
         dispatchTelemetryUpdate();
     }
+    
+    jsonResponse = ""; 
 
-    if (shouldTakePicture)
+    if (shouldTakePicture) {
         takePictureAndSend();
-
-    dispatchMoodUpdate(WAITING);
+    } else if (audio_url_to_play.length() > 0) {
+        vTaskDelay(pdMS_TO_TICKS(250)); 
+        playAudioResponse(audio_url_to_play.c_str());
+    } else {
+        dispatchMoodUpdate(WAITING);
+    }
 }
 
-// This is the main network task that runs on Core 0, responsible for
-// initializing the WiFi connection, setting up the I2S microphone input,
-// running the wake word detection loop, and handling the logic for recording
-// and sending audio to the API when the wake word is detected
 void networkTask(void *pvParameters)
 {
     setupWiFi();
     dispatchMoodUpdate(WAITING);
 
-    // I2S Microphone Setup
     i2s_config_t i2s_config = {
         .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
         .sample_rate = EI_CLASSIFIER_FREQUENCY,
@@ -669,36 +637,20 @@ void networkTask(void *pvParameters)
     unsigned long last_trigger_time = 0;
     size_t bytes_read = 0;
 
-    // The main loop continuously reads audio data from the I2S microphone,
-    // processes it through the wake word detection model, and triggers the
-    // recording and sending of audio to the API when a wake word is detected
-    // with sufficient confidence, while also implementing a cooldown mechanism
-    // to prevent multiple triggers in quick succession
     while (true)
     {
         i2s_read(I2S_PORT_MIC, i2s_read_buff, chunk_size * sizeof(int32_t), &bytes_read, portMAX_DELAY);
         int samples_read = bytes_read / sizeof(int32_t);
 
-        // Shift the existing audio data in the inference buffer to make room
-        // for the new samples, effectively creating a sliding window of audio data for
-        // the wake word detection model
         numpy::roll(inference_buffer, EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE, -samples_read);
 
-        // A pointer to the start of the new data in the inference buffer, where
-        // the latest audio samples will be written after conversion from 32-bit
-        // I2S format to 16-bit PCM format
         int16_t *new_data_start = inference_buffer + (EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE - samples_read);
 
-        // Convert the 32-bit I2S audio data to 16-bit PCM format
         for (int i = 0; i < samples_read; i++)
         {
             new_data_start[i] = (int16_t)(i2s_read_buff[i] >> 14);
         }
 
-        // Calculate the average amplitude of the audio samples in the inference
-        // buffer to use as a simple measure of volume, which can be used to
-        // filter out low-volume noise and prevent false triggers of the wake
-        // word detection
         long sum_amplitude = 0;
         for (int i = 0; i < EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE; i++)
         {
@@ -706,7 +658,6 @@ void networkTask(void *pvParameters)
         }
         int avg_buffer_volume = sum_amplitude / EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE;
 
-        // Set up the signal structure for the wake word detection model, providing a pointer to the inference buffer and the function to retrieve audio data for processing
         signal_t signal;
         signal.total_length = EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE;
         signal.get_data = &microphone_audio_signal_get_data;
@@ -714,22 +665,12 @@ void networkTask(void *pvParameters)
         ei_impulse_result_t result = {0};
         EI_IMPULSE_ERROR r = run_classifier(&signal, &result, false);
 
-        // If the inference engine returns an error, skip this iteration and
-        // wait for the next batch of audio data to process, while also adding a
-        // small delay to prevent spamming the CPU with continuous inference
-        // attempts in case of persistent errors
         if (r != EI_IMPULSE_OK)
         {
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
 
-        // Iterate through the classification results to check for the presence
-        // of the wake word with sufficient confidence, and if detected, trigger
-        // the recording and sending of audio to the API, while also
-        // implementing a cooldown mechanism to prevent multiple triggers in
-        // quick succession
-        //> Sliding window approach with cooldown to prevent multiple triggers from a single wake word utterance
         for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++)
         {
             if (strcmp(result.classification[ix].label, "wake_word") == 0 ||

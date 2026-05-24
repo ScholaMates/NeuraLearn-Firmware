@@ -36,6 +36,7 @@ enum EventType {
     API_RESPONSE_RECEIVED,    
     EVENT_AI_REPLY_RECEIVED,  
     EVENT_TELEMETRY_UPDATE,
+    TRIGGER_ERROR_TIMEOUT,
     
     // Action Events
     UPDATE_FACE_MOOD,         
