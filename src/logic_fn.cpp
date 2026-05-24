@@ -18,6 +18,7 @@
 #include "AudioFileSourceHTTPStream.h"
 #include "AudioGeneratorWAV.h"
 #include "AudioOutputI2S.h"
+#include "AudioFileSourceBuffer.h" 
 #include <fabiocanavarro-project-1_inferencing.h>
 
 // API Endpoints and Configurations
@@ -41,6 +42,7 @@ int32_t *i2s_read_buff;
 
 AudioGeneratorWAV *wav;
 AudioFileSource *file;
+AudioFileSourceBuffer *buff; 
 AudioOutputI2S *out;
 
 // This function updates the mood global state and sends an event to the UI to trigger a face redraw with the new mood
@@ -71,6 +73,15 @@ void dispatchTelemetryUpdate()
     xQueueSend(eventQueue, &ev, portMAX_DELAY);
 }
 
+// This function takes the current mood from the global state and updates the face displayed on the UI accordingly, along with the text description of the mood
+void handleNetworkError(const char* errorMessage) {
+    Serial.printf("Error: [NETWORK] %s\n", errorMessage);
+    dispatchMoodUpdate(SAD_ERROR);
+    // Add a short delay to allow the user to see the error state before resetting
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    dispatchMoodUpdate(WAITING);
+}
+
 // This function retrieves audio signal data from the microphone buffer, converts it from int16 to float, and provides it to the inference engine for processing
 //> The inference engine(AI model) expects float data in the range of -1.0 to 1.0
 int microphone_audio_signal_get_data(size_t offset, size_t length, float *out_ptr)
@@ -83,9 +94,10 @@ int microphone_audio_signal_get_data(size_t offset, size_t length, float *out_pt
 //> The WifiManager here allows for better user experience in connecting to WiFi, with a web portal which is insane
 void setupWiFi()
 {
-    Serial.println("Info: [NETWORK] Connecting to WiFi");
-    wifiManager.setConfigPortalTimeout(1000000000);
-    wifiManager.setBreakAfterConfig(false);
+    wifiManager.setCaptivePortalEnable(true); 
+    wifiManager.setConnectTimeout(30);
+    wifiManager.setConfigPortalTimeout(120); 
+    wifiManager.setBreakAfterConfig(true);
 
     while (!state.isConnectedToWifi)
     {
@@ -96,7 +108,7 @@ void setupWiFi()
                 state.isConnectedToWifi = false;
                 dispatchTelemetryUpdate();
                 wifiRetryCount += 1;
-                delay(2000);
+                vTaskDelay(pdMS_TO_TICKS(2000));
             }
             else
             {
@@ -110,8 +122,6 @@ void setupWiFi()
             dispatchTelemetryUpdate();
         }
     }
-    Serial.println("Info: [NETWORK] WiFi connected!");
-    Serial.println("Info: [NETWORK] Syncing NTP (Singapore Time)...");
     configTime(25200, 0, "pool.ntp.org", "time.nist.gov");
 }
 
@@ -136,7 +146,6 @@ void setupWiFi()
     > class, which expects an AudioFileSource to read audio data from. By using
     > this custom class, we can stream audio responses from the API securely
     > over HTTPS without blocking the main thread or causing performance issues.
-
 */
 class AudioFileSourceInsecureHTTPS : public AudioFileSource
 {
@@ -180,45 +189,70 @@ public:
     virtual uint32_t read(void *data, uint32_t len) override
     {
         // If the connection isn't open, return 0 bytes read
-        if (!opened)
-            return 0;
+        if (!opened) return 0;
 
-        // Get the underlying stream from the HTTP client
-        WiFiClient *stream = http.getStreamPtr();
-        if (!stream)
-        {
+        // --- THE ZOMBIE SOCKET FIX ---
+        // If we physically received the entire payload, aggressively kill the connection.
+        // This prevents the robot from hanging on the "SPEAKING" face infinitely.
+        if (size > 0 && pos >= size) {
+            opened = false;
             return 0;
         }
 
+        // Get the underlying stream from the HTTP client
+        WiFiClient *stream = http.getStreamPtr();
+        if (!stream) return 0;
+
         // Read data in a loop until we've read the requested length or the connection is closed
-        uint32_t bytesRead = 0;
+        uint32_t bytesread = 0;
         uint8_t *buf = (uint8_t *)data;
         unsigned long timeout = millis();
 
-        while (bytesRead < len && http.connected())
+        while (bytesread < len && http.connected())
         {
-            if (stream->available())
+            int available = stream->available();
+            if (available > 0)
             {
+                // Maximize throughput by reading massive chunks instead of byte-by-byte
+                int toread = len - bytesread;
+                if (toread > available) toread = available;
+                
                 // Read data from the stream into the buffer
-                int r = stream->read(buf + bytesRead, len - bytesRead);
+                int r = stream->read(buf + bytesread, toread);
 
                 // If we read some data, update the bytesRead count and reset the timeout
                 if (r > 0)
                 {
-                    bytesRead += r;
+                    bytesread += r;
                     pos += r;
                     timeout = millis();
                 }
             }
             else
             {
-                // If no data is available, check for a timeout to prevent stalling
-                if (millis() - timeout > 5000)
+                // Check for EOF inside the wait loop
+                if (size > 0 && pos >= size) {
+                    opened = false;
                     break;
-                vTaskDelay(pdMS_TO_TICKS(2));
+                }
+
+                // If no data is available, check for a timeout to prevent stalling
+                if (millis() - timeout > 10000)
+                {
+                    opened = false; // KILL THE SOCKET SO IT DOES NOT LOOP FOREVER
+                    break;
+                }
+
+                vTaskDelay(pdMS_TO_TICKS(1)); // 1ms delay for hyper-fast network polling
             }
         }
-        return bytesRead;
+
+        // Violent server closure detection
+        if (!http.connected() && bytesread == 0) {
+            opened = false; 
+        }
+
+        return bytesread;
     }
 
     // This method provides a non-blocking way to read audio data, which can be used by the audio generator to fetch data without stalling the main thread
@@ -228,25 +262,20 @@ public:
     virtual bool seek(int32_t newPos, int dir) override
     {
         // If the connection isn't open, we can't seek
-        if (!opened)
-            return false;
+        if (!opened) return false;
 
         // Calculate the new position based on the direction (0 = absolute, 1 = relative to current position)
-        if (dir == 1)
-            newPos = pos + newPos;
+        if (dir == 1) newPos = pos + newPos;
 
         // If the new position is before the current position, we can't seek backwards in a stream, so return false
-        if (newPos < pos)
-            return false;
+        if (newPos < pos) return false;
 
         uint32_t bytesToSkip = newPos - pos;
 
-        if (bytesToSkip == 0)
-            return true;
+        if (bytesToSkip == 0) return true;
 
         WiFiClient *stream = http.getStreamPtr();
-        if (!stream)
-            return false;
+        if (!stream) return false;
 
         uint8_t trash[128];
         while (bytesToSkip > 0 && http.connected())
@@ -255,18 +284,14 @@ public:
             unsigned long timeout = millis();
             while (!stream->available() && http.connected())
             {
-                if (millis() - timeout > 5000)
-                    return false;
+                if (millis() - timeout > 10000) return false;
                 vTaskDelay(pdMS_TO_TICKS(2));
             }
             int r = stream->read(trash, readLen);
-            if (r > 0)
-            {
+            if (r > 0) {
                 bytesToSkip -= r;
                 pos += r;
-            }
-            else
-            {
+            } else {
                 return false;
             }
         }
@@ -289,50 +314,78 @@ public:
 // while allowing for dynamic volume adjustments based on the global configuration
 void playAudioResponse(const char *wav_url)
 {
-    Serial.println("\nInfo: [SYSTEM] Playing Audio Response...");
+    // CRITICAL UX SHIFT: Do NOT dispatch the SPEAKING face yet.
+    // The previous network function (takePicture or recordAudio) already set the face to THINKING.
+    // We maintain the THINKING state to mask the audio downloading latency.
     state.isPlayingAudio = true;
     dispatchTelemetryUpdate();
-    dispatchMoodUpdate(SPEAKING);
 
     // Audio Output Setup
     out = new AudioOutputI2S(1, AudioOutputI2S::EXTERNAL_I2S);
     out->SetPinout(I2S_SPK_BCLK, I2S_SPK_LRC, I2S_SPK_DIN);
-
-    // Initial Volume Setup (Float mapping 0.0 to 1.0)
-    float initial_vol = (float)globalConfig.volume / 100.0f;
-    out->SetGain(initial_vol);
+    out->SetGain(((float)globalConfig.volume / 100.0f) * 4.0f);
     out->SetOutputModeMono(true);
 
     file = new AudioFileSourceInsecureHTTPS(wav_url);
+    
+    // SAFETY CHECK: Verify the stream is actually alive
+    if (!file->isOpen()) {
+        state.isPlayingAudio = false;
+        dispatchTelemetryUpdate();
+        dispatchMoodUpdate(WAITING);
+        delete file;
+        delete out;
+        return;
+    }
+
+    // 128KB WAREHOUSE INJECTION (Asynchronous Stockpiling)
+    // Allocates exactly 131,072 bytes (4 seconds of raw PCM) directly into the PSRAM.
+    // The moment this is instantiated, an invisible FreeRTOS task begins violently 
+    // sucking data out of the Wi-Fi antenna to fill the RAM.
+    buff = new AudioFileSourceBuffer(file, 131072); 
+    
+    // PRE-FETCH LATENCY SHIELD
+    // We intentionally halt the main execution thread for 2.5 seconds. 
+    // Since the face is still "THINKING," the user assumes the AI is still generating.
+    // In reality, the AI is done, and the ESP32 is physically stockpiling the audio payload.
+    vTaskDelay(pdMS_TO_TICKS(2500));
+
     wav = new AudioGeneratorWAV();
 
     // Start streaming and playing the audio response, while monitoring the global volume for real-time adjustments
-    if (wav->begin(file, out))
+    if (wav->begin(buff, out))
     {
+        // PERFECT SYNCHRONIZATION
+        // Now that the 128KB warehouse is primed and the WAV engine is engaging, 
+        // we forcefully snap the UI to the SPEAKING state exactly as the sound waves hit the room.
+        dispatchMoodUpdate(SPEAKING);
+
         uint8_t last_applied_vol = globalConfig.volume;
 
         while (wav->isRunning())
         {
-            if (!wav->loop())
-            {
+            if (!wav->loop()) {
                 wav->stop();
-            }
-            else
-            {
-                uint8_t current_vol = globalConfig.volume;
-
+                if (out) out->stop();
+            } else {
                 // If the volume has changed in the global configuration, update the audio output gain in real-time without interrupting playback
-                if (current_vol != last_applied_vol)
-                {
-                    out->SetGain((float)current_vol / 100.0f);
+                uint8_t current_vol = globalConfig.volume;
+                if (current_vol != last_applied_vol) {
+                    out->SetGain(((float)current_vol / 100.0f) * 4.0f);
                     last_applied_vol = current_vol;
-                    Serial.printf("Info: [AUDIO] Volume changed to %d%%, updated audio output gain.\n", current_vol);
                 }
             }
             vTaskDelay(pdMS_TO_TICKS(2));
         }
+    } else {
+        if (out) out->stop(); 
     }
+
+    // MEMORY DEALLOCATION
+    // Deleting "out" triggers the destructor which gracefully uninstalls the I2S driver.
+    // This physically drops the pins to 0V, perfectly silencing the amplifier without an MMU panic.
     delete wav;
+    delete buff;
     delete file;
     delete out;
 
@@ -344,9 +397,8 @@ void playAudioResponse(const char *wav_url)
 // This function captures an image from the camera, uploads it to the vision API endpoint, and handles the response to trigger audio playback if an audio URL is returned in the response
 void takePictureAndSend()
 {
-    Serial.println("\nInfo: [CAMERA] Capturing image and sending to Vision API...");
-    dispatchMoodUpdate(POMODORO_FOCUS);
-
+    dispatchMoodUpdate(POMODORO_FOCUS); 
+    
     // UI Countdown
     for (int i = 3; i > 0; i--)
     {
@@ -359,12 +411,14 @@ void takePictureAndSend()
 
     // Grab frame from camera
     camera_fb_t *fb = esp_camera_fb_get();
+    
+    // Clear the notification text area so "SNAP!" doesn't sit on the screen forever
+    dispatchNotification(" "); 
+
     if (!fb)
     {
-        Serial.println("Error: [CAMERA] Frame buffer grab failed. Memory might be corrupted.");
         return;
     }
-    Serial.printf("Debug: [CAMERA] Captured frame successfully: %dx%d, %d bytes\n", fb->width, fb->height, fb->len);
 
     // Upload the JPEG buffer directly to the Vision endpoint
     String jsonResponse = "";
@@ -382,24 +436,33 @@ void takePictureAndSend()
         http.begin(client, String("https://") + API_HOST + VISION_API_PATH);
 
         http.addHeader("Content-Type", "image/jpeg");
+        
+        // This is perfectly bridging with the new Route.ts patch
         http.addHeader("x-user-id", TEST_USER_ID);
         if (currentChatId.length() > 0)
             http.addHeader("x-chat-id", currentChatId);
 
-        Serial.println("Info: [NETWORK] Uploading JPEG payload to Vercel...");
         int httpResponseCode = http.POST(fb->buf, fb->len);
         if (httpResponseCode == 200 || httpResponseCode == 201)
         {
             jsonResponse = http.getString();
-            Serial.println("Info: [NETWORK] Vision API processed successfully.");
         }
         else
         {
-            Serial.printf("Error: [NETWORK] Vision API failed with code: %d\n", httpResponseCode);
             state.isConnectedToServer = false;
             dispatchTelemetryUpdate();
         }
         http.end();
+        
+        if (httpResponseCode <= 0) {
+            handleNetworkError("HTTP Request Failed/Timed Out");
+            return;
+        }
+
+        if (httpResponseCode != 200) {
+            handleNetworkError("Server returned non-200 status");
+            return;
+        }
     }
 
     // Return the buffer back to the camera driver pool
@@ -408,7 +471,8 @@ void takePictureAndSend()
     // Handle the enpoint response, if it contains an audio URL, trigger the audio playback function to play the response through the speaker
     if (jsonResponse.length() > 0)
     {
-        JsonDocument resDoc;
+        // Allocated dynamically for vision payload safety
+        JsonDocument resDoc; 
         if (!deserializeJson(resDoc, jsonResponse) && resDoc.containsKey("audio_url"))
         {
             playAudioResponse(resDoc["audio_url"]);
@@ -421,8 +485,6 @@ void takePictureAndSend()
 // streaming it to the API, and processing the response to trigger UI updates and audio playback
 void recordAndSendAudioToAPI()
 {
-    Serial.println("\nInfo: [SYSTEM] Wake word detected, starting audio recording...");
-
     state.isListening = true;
     dispatchTelemetryUpdate();
 
@@ -473,10 +535,8 @@ void recordAndSendAudioToAPI()
     // If memory allocation for the audio buffers fails, clean up and return early to prevent crashes
     if (!temp_i2s_chunk || !pcm_16_chunk)
     {
-        if (temp_i2s_chunk)
-            free(temp_i2s_chunk);
-        if (pcm_16_chunk)
-            free(pcm_16_chunk);
+        if (temp_i2s_chunk) free(temp_i2s_chunk);
+        if (pcm_16_chunk) free(pcm_16_chunk);
         client.stop();
         return;
     }
@@ -489,13 +549,12 @@ void recordAndSendAudioToAPI()
     // Read audio data from the microphone in chunks, convert it to 16-bit PCM, and stream it to the API using chunked transfer encoding
     while (millis() - start_time < MAX_RECORD_TIME_MS)
     {
-        //> The portMAX_DELAY means the task will wait indefinitely until data is avaliable
         i2s_read(I2S_PORT_MIC, temp_i2s_chunk, chunk_size * sizeof(int32_t), &bytes_read, portMAX_DELAY);
 
         size_t samples_read = bytes_read / sizeof(int32_t);
         long sum_amplitude = 0;
 
-        // Convert the 32-bit I2S audio data to 16-bit PCM format expected by my the website endpoint
+        // Convert the 32-bit I2S audio data to 16-bit PCM format
         for (size_t i = 0; i < samples_read; i++)
         {
             pcm_16_chunk[i] = (int16_t)(temp_i2s_chunk[i] >> 14);
@@ -518,7 +577,6 @@ void recordAndSendAudioToAPI()
     }
 
     client.print("0\r\n\r\n");
-    Serial.println("Info: [SYSTEM] -> Stream closed. Waiting for AI response...");
 
     state.isListening = false;
     dispatchTelemetryUpdate();
@@ -569,7 +627,6 @@ void recordAndSendAudioToAPI()
     if (shouldTakePicture)
         takePictureAndSend();
 
-    i2s_zero_dma_buffer(I2S_PORT_MIC);
     dispatchMoodUpdate(WAITING);
 }
 
@@ -579,8 +636,6 @@ void recordAndSendAudioToAPI()
 // and sending audio to the API when the wake word is detected
 void networkTask(void *pvParameters)
 {
-    Serial.println("Info: [SYSTEM] Logic Task started on Core 0");
-
     setupWiFi();
     dispatchMoodUpdate(WAITING);
 
@@ -592,8 +647,8 @@ void networkTask(void *pvParameters)
         .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
         .communication_format = I2S_COMM_FORMAT_STAND_I2S,
         .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-        .dma_buf_count = 8,
-        .dma_buf_len = 512,
+        .dma_buf_count = 16,
+        .dma_buf_len = 1024,
         .use_apll = false,
         .tx_desc_auto_clear = false,
         .fixed_mclk = 0};
@@ -645,12 +700,6 @@ void networkTask(void *pvParameters)
         // filter out low-volume noise and prevent false triggers of the wake
         // word detection
         long sum_amplitude = 0;
-
-        for (int i = 0; i < samples_read; i++)
-        {
-            new_data_start[i] = (int16_t)(i2s_read_buff[i] >> 14);
-        }
-
         for (int i = 0; i < EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE; i++)
         {
             sum_amplitude += abs(inference_buffer[i]);
@@ -689,13 +738,10 @@ void networkTask(void *pvParameters)
 
                 if (result.classification[ix].value > CONFIDENCE_THRESHOLD && avg_buffer_volume > SILENCE_THRESHOLD)
                 {
-                    Serial.printf("Debug: [INFERENCE] Detected '%s' with confidence %.2f and average volume %d\n", result.classification[ix].label, result.classification[ix].value, avg_buffer_volume);
                     unsigned long now = millis();
                     if (now - last_trigger_time > COOLDOWN_MS)
                     {
                         last_trigger_time = now;
-
-                        Serial.printf("\nWAKE DETECTED! (Score: %.2f)\n", result.classification[ix].value);
 
                         recordAndSendAudioToAPI();
 
@@ -709,23 +755,15 @@ void networkTask(void *pvParameters)
     }
 }
 
-// This function is the main hardware task that runs on Core 1
 void hardwareTask(void *pvParameters)
 {
     Serial.println("Info: [Hardware] Hardware Task started on Core 1");
 
     pinMode(BUTTON_1, INPUT_PULLDOWN);
 
-    // Set the ADC resolution and attenuation for reading the volume
-    // potentiometer, allowing for accurate volume level detection based on the
-    // potentiometer's position
     analogReadResolution(12);
     analogSetAttenuation(ADC_11db);
 
-    // Wait for WiFi connection before proceeding with any operations that
-    // require network access, ensuring that the system doesn't attempt to
-    // perform network operations before it's ready, which could lead to errors
-    // or unintended behavior
     while (!state.isConnectedToWifi)
     {
         vTaskDelay(pdMS_TO_TICKS(500));
@@ -742,27 +780,10 @@ void hardwareTask(void *pvParameters)
     bool shield_dropped_notified = false;
     unsigned long last_busy_toast_time = 0;
 
-    //> By the way, the chronological shield functions as a safety mechanism to
-    //> prevent the hardware kill-switch from being activated immediately after
-    //> powering on the device, which could be caused by accidental button
-    //> presses or hardware issues during startup.
-    //> It works by creating a time window (8 seconds in this case) during which the kill-switch is disabled, allowing
-    //> the system to stabilize and ensuring that critical operations are not
-    //> interrupted by unintended shutdowns. The UI also provides feedback to
-    //> the user when the shield is active and when it drops, enhancing the
-    //> overall user experience and safety of the device.
-
     while (true)
     {
-        //! For the actual steam presentation, we will use a real battery to
-        //! measure voltage levels.
         int batt_pct = 100;
 
-        // Since the battery level can be a critical factor in the device's
-        // operation, we read the battery voltage from the ADC and calculate the
-        // percentage, updating the global state and UI if there's a significant
-        // change, and also triggering a low battery mood update if the battery
-        // level drops below a critical threshold
         if (abs(batt_pct - state.batteryLevel) >= 2)
         {
             xSemaphoreTake(dataMutex, portMAX_DELAY);
@@ -777,34 +798,12 @@ void hardwareTask(void *pvParameters)
             }
         }
 
-        // Read the volume potentiometer value, apply an exponential moving
-        // average filter for stability, map it to a percentage value, and
-        // update the global state and UI if it has changed significantly (by 3%
-        // or more) since the last update
         int raw_vol = analogRead(VOLUME_POT_PIN);
 
-        // Apply an exponential moving average filter to the raw volume reading
-        // to stabilize it and prevent rapid fluctuations in the volume level
-        /*>
-            By the way, EMA(Exponential Moving Average) is a filtering technique
-            that gives more weight to recent data points, making it more
-            responsive to changes while still smoothing out noise. The alpha
-            value (0.2 in this case) determines how much weight is given to the
-            new data versus the previous EMA value. A higher alpha makes it more
-            responsive, while a lower alpha makes it smoother.
-
-            The formula for EMA is:
-            EMA_current = (alpha * New_Data) + ((1 - alpha) * EMA_previous
-        */
         ema_vol = (0.2 * raw_vol) + (0.8 * ema_vol);
-
-        // Map the EMA-filtered volume reading to a percentage value (0-100%)
         int vol_pct = map((int)ema_vol, 0, 4095, 100, 0);
-
-        // Constrain the volume percentage to be within the valid range of 0 to 100
         vol_pct = constrain(vol_pct, 0, 100);
 
-        // If the volume percentage has changed by 3% or more since the last update, update the global state and UI to reflect the new volume level
         if (abs(vol_pct - globalConfig.volume) >= 3)
         {
             xSemaphoreTake(dataMutex, portMAX_DELAY);
@@ -813,72 +812,39 @@ void hardwareTask(void *pvParameters)
             dispatchTelemetryUpdate();
         }
 
-        // Check if the system is currently busy with any operations (listening,
-        // connected to server, or playing audio) or if the chronological shield
-        // is still up, and if so, prevent the hardware kill-switch from being
-        // activated to ensure that critical operations are not interrupted
         bool isSystemBusy = state.isListening || state.isConnectedToServer || state.isPlayingAudio;
         bool isShieldUp = (millis() - network_connect_time <= 8000);
 
-        // The exact millisecond the 8-second chronological shield expires, we push a UI update
-        // to tell the human user that the hardware kill-switch is officially unlocked.
         if (!isShieldUp && !shield_dropped_notified)
         {
             dispatchNotification("System Ready!");
             shield_dropped_notified = true;
         }
 
-        // If the user presses the button while the system is not busy and the
-        // shield is down, we start the process for the hardware kill-switch,
-        // which requires a 5-second hold followed by a physical release to
-        // confirm the user's intent to power off the device, while also
-        // implementing safeguards to prevent accidental activation or hardware
-        // issues
         if (!isShieldUp && !isSystemBusy)
         {
             if (digitalRead(BUTTON_1) == HIGH)
             {
-                // Check if the button just went HIGH, if so, we set a
-                // chronological anchor to start measuring the hold time, and
-                // also refresh the last high time to implement the elastic
-                // tension mechanism for micro-tremor forgiveness
                 if (button_press_start == 0)
                 {
-                    button_press_start = millis(); // Drop the chronological anchor
+                    button_press_start = millis();
                     Serial.println("Debug: [SYSTEM] Button just went HIGH. Setting the chronological anchor.");
                 }
-                button_last_high = millis(); // Refresh the elastic tension
+                button_last_high = millis();
 
-                // Check if the button has been held HIGH for 5 seconds to
-                // verify the user's intent to activate the hardware
-                // kill-switch, while providing feedback through the serial
-                // monitor
                 if (millis() - button_press_start >= 5000)
                 {
                     Serial.println("Info: [SYSTEM] 5-Second Active-High hold verified. Awaiting physical release...");
 
                     dispatchMoodUpdate(SLEEPING);
 
-                    // The Wait-For-Release Trap (Now checking for HIGH)
                     unsigned long trap_start = millis();
                     bool valid_release = false;
 
-                    // We wait for the user to physically release the button
-                    // (drop back to LOW), while also checking if the pin is
-                    // stuck HIGH for more than 10 seconds to detect potential
-                    // hardware issues, and providing feedback through the
-                    // serial monitor
                     while (digitalRead(BUTTON_1) == HIGH)
                     {
                         vTaskDelay(pdMS_TO_TICKS(50));
 
-                        // Checks if the pin is stuck HIGH for more than 10 seconds
-                        /*
-                            > Since it's possible for their to be a hardware
-                            > shorts or other failure, this checks for it.
-                            > if so, it aborts the shutdown sequence to prevent
-                            > potential damage or unintended behavior
-                        */
                         if (millis() - trap_start > 10000)
                         {
                             Serial.println("Error: [SYSTEM] Pin HIGH for >10s. Hardware short detected! Aborting.");
@@ -886,33 +852,18 @@ void hardwareTask(void *pvParameters)
                         }
                     }
 
-                    // If it successfully dropped back to bedrock (LOW), it was a real release.
                     if (digitalRead(BUTTON_1) == LOW)
                     {
                         valid_release = true;
                     }
 
-                    // If the release was valid, we proceed with the hardware
-                    // kill-switch sequence, which involves enabling GPIO hold
-                    // to maintain the state of the button pin even after power
-                    // is cut, enabling deep sleep hold to keep the backlight
-                    // off, and configuring the ULP coprocessor to wake the
-                    // system only on a specific external signal (the button
-                    // being pressed again) to prevent accidental wake-ups and
-                    // ensure a clean shutdown
                     if (valid_release)
                     {
                         Serial.println("Info: [SYSTEM] Button released cleanly. Executing hardware kill-switch.");
                         vTaskDelay(pdMS_TO_TICKS(100));
 
-                        // Transfer the pin's state (including the INPUT_PULLDOWN) to the RTC backup power grid.
-                        // This prevents the bungee cord from snapping when the main CPU power is cut.
                         gpio_hold_en((gpio_num_t)BUTTON_1);
-
-                        // Apply the exact same RTC hold to the backlight so it stays pitched black!
                         gpio_deep_sleep_hold_en();
-
-                        // Arm the ULP night-watchman to wake the CPU only on a 3.3V spike (1)
                         esp_sleep_enable_ext0_wakeup((gpio_num_t)BUTTON_1, 1);
                         esp_deep_sleep_start();
                     }
@@ -925,19 +876,13 @@ void hardwareTask(void *pvParameters)
             }
             else
             {
-                // If the button is not currently HIGH, we check if it was
-                // previously HIGH and if it has been released for more than 250
-                // milliseconds to account for micro-tremors or accidental brief
-                // presses, and if so, we reset the chronological anchor to
-                // prevent unintended activation of the hardware kill-switch,
-                // while providing feedback through the serial monitor
                 if (millis() - button_last_high > 250)
                 {
                     if (button_press_start != 0)
                     {
                         Serial.println("Debug: [SYSTEM] Anchor vaporized (Button Released).");
                     }
-                    button_press_start = 0; // Vaporize the anchor
+                    button_press_start = 0; 
                 }
             }
         }
@@ -946,11 +891,8 @@ void hardwareTask(void *pvParameters)
             button_press_start = 0;
             button_last_high = millis();
 
-            // If the user tries to press the button while the system is locked (shield up or busy),
-            // we bridge the silicon's state to the TFT screen to tell the human WHY it's rejecting the input.
             if (digitalRead(BUTTON_1) == HIGH)
             {
-                // 3-second cooldown to prevent spamming the Core 1 UI Queue 20 times a second
                 if (millis() - last_busy_toast_time > 3000)
                 {
                     last_busy_toast_time = millis();

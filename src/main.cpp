@@ -4,6 +4,8 @@
 #include <LittleFS.h>
 #include "esp_camera.h"
 #include "pins.h"
+#include "driver/gpio.h"
+#include "esp_sleep.h"
 
 #include "ui_renderer.h"
 #include "logic_fn.h"
@@ -72,6 +74,13 @@ void setup()
     delay(500);
     Serial.println("\nInfo: [SYSTEM] Booting up NeuraLearn...");
 
+    // JTAG SILICON OVERRIDE: Forcefully detach pins 39-42 from the internal hardware debugger
+    // This allows your I2S audio pipes to claim the pins without being choked by a flatline signal.
+    gpio_reset_pin((gpio_num_t)39);
+    gpio_reset_pin((gpio_num_t)40);
+    gpio_reset_pin((gpio_num_t)41);
+    gpio_reset_pin((gpio_num_t)42);
+
     camera_init();
 
     dataMutex = xSemaphoreCreateMutex();
@@ -101,22 +110,24 @@ void setup()
 
     tft_init(tft, FONT_FILENAME);
 
-    // Create Task on Core 0 (Networking & Logic)
+    // THE STUTTER FIX: Elevate Network Task to Priority 5 (Absolute Authority)
+    // INCREASED STACK: JSON parsing, SSL certificates, and audio chunks consume massive memory.
     xTaskCreatePinnedToCore(
         networkTask, // Function
         "Network",   // Name
-        8192,        // Stack size (bytes)
+        10240,       // Stack size (bytes) - Increased to prevent silent thread crashes
         NULL,        // Params
-        1,           // Priority (Low)
+        5,           // Priority (Elevated from 1 to 5 to prevent audio thread starvation)
         NULL,        // Handle
         0            // CORE 0 ID
     );
 
     // Create Task on Core 1 (UI Rendering)
+    // INCREASED STACK: TFT_eSPI drawing routines and bitmaps require a larger stack headroom.
     xTaskCreatePinnedToCore(
         uiTask, // Function
         "UI",   // Name
-        4096,   // Stack size
+        8192,   // Stack size - Doubled to prevent silent UI freeze (Icons not updating bug)
         &tft,   // Params
         2,      // Priority (High)
         NULL,   // Handle
@@ -127,7 +138,7 @@ void setup()
     xTaskCreatePinnedToCore(
         hardwareTask, // Function
         "Hardware",   // Name
-        2048,         // Stack size
+        4096,         // Stack size - Increased for safety
         NULL,         // Params
         3,            // Priority (Highest - Needs instant response)
         NULL,         // Handle
@@ -137,5 +148,7 @@ void setup()
 
 void loop()
 {
-    // Left empty. Since FreeRTOS tasks handle everything.
+    // Delete the default Arduino loop task to free up 100% of Core 1 for the UI and Hardware tasks.
+    // This prevents the empty loop from spinning infinitely and starving the icons renderer.
+    vTaskDelete(NULL);
 }
